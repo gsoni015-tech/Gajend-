@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Narayani PDF Reader</string>
+    <string name="admob_native_advanced">ca-app-pub-9247143643125748/6648093340</string>
+    <string name="admob_interstitial">ca-app-pub-9247143643125748/3927267520</string>
+    <string name="admob_banner">ca-app-pub-9247143643125748/5366325906</string>
+</resources>

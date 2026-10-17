@@ -1,0 +1,6 @@
+{
+  "name": "Narayani PDF Reader",
+  "description": "Narayani PDF Reader - Modern, high-performance PDF viewer, converter and document utility suite with white mix theme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
