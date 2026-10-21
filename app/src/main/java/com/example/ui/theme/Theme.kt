@@ -1,6 +1,8 @@
 package com.example.ui.theme
 
 import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -14,32 +16,32 @@ private val DarkColorScheme = darkColorScheme(
     primary = BrandPrimary,
     onPrimary = Color.White,
     primaryContainer = Color(0xFF1E3A8A),
-    onPrimaryContainer = Color(0xFFDBEAFE),
-    secondary = BrandCrimson,
-    onSecondary = Color.White,
+    onPrimaryContainer = Color(0xFF93C5FD),
+    error = BrandCrimson,
+    onError = Color.White,
     background = DarkBackground,
+    onBackground = Color(0xFFF3F4F6),
     surface = DarkSurface,
+    onSurface = Color(0xFFF3F4F6),
     surfaceVariant = DarkCard,
-    onBackground = Color(0xFFF1F5F9),
-    onSurface = Color(0xFFF1F5F9),
+    onSurfaceVariant = TextTertiary,
     outline = DarkBorder
 )
 
-// White Mix Color Scheme
 private val LightColorScheme = lightColorScheme(
     primary = BrandPrimary,
     onPrimary = Color.White,
     primaryContainer = BrandPrimaryContainer,
     onPrimaryContainer = BrandOnPrimaryContainer,
-    secondary = BrandCrimson,
-    onSecondary = Color.White,
-    secondaryContainer = BrandCrimsonContainer,
-    onSecondaryContainer = BrandOnCrimsonContainer,
+    error = BrandCrimson,
+    onError = Color.White,
+    errorContainer = BrandCrimsonContainer,
+    onErrorContainer = BrandOnCrimsonContainer,
     background = WhiteMixBackground,
-    surface = WhiteMixSurface,
-    surfaceVariant = WhiteMixSurfaceVariant,
     onBackground = TextPrimary,
+    surface = WhiteMixSurface,
     onSurface = TextPrimary,
+    surfaceVariant = WhiteMixSurfaceVariant,
     onSurfaceVariant = TextSecondary,
     outline = WhiteMixBorder,
     outlineVariant = WhiteMixBorderSubtle
@@ -47,11 +49,11 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = false, // Defaults to the requested White Mix theme
-    dynamicColor: Boolean = false, // Keep consistent branding colors
-    content: @Composable () -> Unit,
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    dynamicColor: Boolean = false,
+    content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
+    val colorScheme: ColorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)

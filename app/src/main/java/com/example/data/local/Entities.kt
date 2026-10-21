@@ -3,11 +3,8 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-enum class DocumentType(val label: String, val badge: String) {
-    PDF("PDF", "PDF"),
-    EXCEL("Excel", "XLS"),
-    WORD("Word", "DOC"),
-    MAIN_FILE("Main Text", "TXT")
+enum class DocumentType {
+    PDF, WORD, EXCEL, OTHER
 }
 
 @Entity(tableName = "pdf_files")
@@ -17,35 +14,27 @@ data class PdfEntity(
     val title: String,
     val uriString: String,
     val sizeBytes: Long,
-    val pageCount: Int,
+    val lastModifiedTimestamp: Long,
     val lastOpenedTimestamp: Long = 0L,
-    val lastModifiedTimestamp: Long = 0L,
     val isFavorite: Boolean = false,
+    val pageCount: Int = 1,
     val isLocked: Boolean = false,
     val password: String = "",
     val folderName: String = "Documents"
-)
+) {
+    val documentType: DocumentType
+        get() = when {
+            path.endsWith(".pdf", ignoreCase = true) || title.endsWith(".pdf", ignoreCase = true) -> DocumentType.PDF
+            path.endsWith(".docx", ignoreCase = true) || path.endsWith(".doc", ignoreCase = true) ||
+                    title.endsWith(".docx", ignoreCase = true) || title.endsWith(".doc", ignoreCase = true) -> DocumentType.WORD
+            path.endsWith(".xlsx", ignoreCase = true) || path.endsWith(".xls", ignoreCase = true) ||
+                    path.endsWith(".csv", ignoreCase = true) || title.endsWith(".xlsx", ignoreCase = true) ||
+                    title.endsWith(".xls", ignoreCase = true) || title.endsWith(".csv", ignoreCase = true) -> DocumentType.EXCEL
+            else -> DocumentType.OTHER
+        }
+}
 
-val PdfEntity.documentType: DocumentType
-    get() = when {
-        path.endsWith(".xlsx", ignoreCase = true) ||
-        path.endsWith(".xls", ignoreCase = true) ||
-        path.endsWith(".csv", ignoreCase = true) ||
-        path.endsWith(".tsv", ignoreCase = true) -> DocumentType.EXCEL
-
-        path.endsWith(".docx", ignoreCase = true) ||
-        path.endsWith(".doc", ignoreCase = true) ||
-        path.endsWith(".rtf", ignoreCase = true) -> DocumentType.WORD
-
-        path.endsWith(".txt", ignoreCase = true) ||
-        path.endsWith(".md", ignoreCase = true) ||
-        path.endsWith(".json", ignoreCase = true) ||
-        path.endsWith(".log", ignoreCase = true) -> DocumentType.MAIN_FILE
-
-        else -> DocumentType.PDF
-    }
-
-@Entity(tableName = "bookmarks")
+@Entity(tableName = "pdf_bookmarks")
 data class BookmarkEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0L,

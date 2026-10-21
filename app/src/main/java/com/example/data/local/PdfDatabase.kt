@@ -18,8 +18,9 @@ abstract class PdfDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     PdfDatabase::class.java,
-                    "pdf_master_db"
-                ).fallbackToDestructiveMigration()
+                    "narayani_pdf.db"
+                )
+                    .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance
                 instance

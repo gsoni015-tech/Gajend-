@@ -1,14 +1,12 @@
 package com.example.data.repository
 
-import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
+import android.os.Environment
 import com.example.data.local.BookmarkEntity
 import com.example.data.local.PdfDao
 import com.example.data.local.PdfDatabase
 import com.example.data.local.PdfEntity
-import com.example.pdf.PdfRendererHelper
 import com.example.pdf.SamplePdfGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -17,62 +15,52 @@ import java.io.File
 import java.io.FileOutputStream
 
 class PdfRepository(private val context: Context) {
-    private val pdfDao: PdfDao = PdfDatabase.getInstance(context).pdfDao()
+    private val dao: PdfDao = PdfDatabase.getInstance(context).pdfDao()
 
-    val allPdfs: Flow<List<PdfEntity>> = pdfDao.getAllPdfs()
-    val recentPdfs: Flow<List<PdfEntity>> = pdfDao.getRecentPdfs()
-    val favoritePdfs: Flow<List<PdfEntity>> = pdfDao.getFavoritePdfs()
+    val allPdfs: Flow<List<PdfEntity>> = dao.getAllPdfs()
+    val favoritePdfs: Flow<List<PdfEntity>> = dao.getFavoritePdfs()
+    val recentPdfs: Flow<List<PdfEntity>> = dao.getRecentPdfs()
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
-        // Create sample PDFs & Office files if needed
-        val pdfSamples = SamplePdfGenerator.generateSamplePdfsIfNeeded(context)
-        val officeSamples = com.example.reader.OfficeDocumentHelper.generateSampleOfficeFiles(context)
-        val allSamples = pdfSamples + officeSamples
-
-        for (file in allSamples) {
-            val existing = pdfDao.getPdfByPath(file.absolutePath)
-            if (existing == null) {
-                val pageCount = if (file.name.endsWith(".pdf", ignoreCase = true)) {
-                    PdfRendererHelper.getPageCountForFile(file)
-                } else 1
-                pdfDao.insertPdf(
-                    PdfEntity(
-                        path = file.absolutePath,
-                        title = file.nameWithoutExtension.replace("_", " "),
-                        uriString = Uri.fromFile(file).toString(),
-                        sizeBytes = file.length(),
-                        pageCount = pageCount,
-                        lastModifiedTimestamp = file.lastModified(),
-                        folderName = file.parentFile?.name ?: "Documents"
-                    )
-                )
-            }
+        // Ensure sample documents are generated on first launch
+        val demoFiles = SamplePdfGenerator.generateInitialDocuments(context)
+        for (f in demoFiles) {
+            val entity = PdfEntity(
+                path = f.absolutePath,
+                title = f.name,
+                uriString = Uri.fromFile(f).toString(),
+                sizeBytes = f.length(),
+                lastModifiedTimestamp = f.lastModified(),
+                folderName = "Demo Documents"
+            )
+            dao.insertPdf(entity)
         }
-        // Scan Documents directory for any new files
-        scanAppDocumentsDir()
     }
 
-    private suspend fun scanAppDocumentsDir() {
-        val docsDir = File(context.filesDir, "Documents")
-        val supportedExtensions = listOf(".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv", ".tsv", ".txt", ".md", ".json", ".log")
-        if (docsDir.exists()) {
-            docsDir.listFiles { _, name -> supportedExtensions.any { ext -> name.endsWith(ext, ignoreCase = true) } }?.forEach { file ->
-                val existing = pdfDao.getPdfByPath(file.absolutePath)
-                if (existing == null) {
-                    val pageCount = if (file.name.endsWith(".pdf", ignoreCase = true)) {
-                        PdfRendererHelper.getPageCountForFile(file)
-                    } else 1
-                    pdfDao.insertPdf(
-                        PdfEntity(
-                            path = file.absolutePath,
-                            title = file.nameWithoutExtension.replace("_", " "),
-                            uriString = Uri.fromFile(file).toString(),
-                            sizeBytes = file.length(),
-                            pageCount = pageCount,
-                            lastModifiedTimestamp = file.lastModified(),
-                            folderName = "Documents"
+    suspend fun autoFetchDeviceDocuments() = withContext(Dispatchers.IO) {
+        val searchDirs = listOf(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            File(context.filesDir, "NarayaniDocuments")
+        )
+
+        for (dir in searchDirs) {
+            if (!dir.exists() || !dir.isDirectory) continue
+            val files = dir.listFiles() ?: continue
+            for (f in files) {
+                if (f.isFile && (f.name.endsWith(".pdf", true) || f.name.endsWith(".docx", true) || f.name.endsWith(".xlsx", true))) {
+                    val existing = dao.getPdfByPath(f.absolutePath)
+                    if (existing == null) {
+                        val entity = PdfEntity(
+                            path = f.absolutePath,
+                            title = f.name,
+                            uriString = Uri.fromFile(f).toString(),
+                            sizeBytes = f.length(),
+                            lastModifiedTimestamp = f.lastModified(),
+                            folderName = dir.name
                         )
-                    )
+                        dao.insertPdf(entity)
+                    }
                 }
             }
         }
@@ -80,42 +68,25 @@ class PdfRepository(private val context: Context) {
 
     suspend fun importPdfFromUri(uri: Uri): PdfEntity? = withContext(Dispatchers.IO) {
         try {
-            var fileName = "Imported_Document_${System.currentTimeMillis()}.pdf"
-            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (nameIndex != -1 && cursor.moveToFirst()) {
-                    fileName = cursor.getString(nameIndex)
-                }
-            }
-            if (!fileName.contains(".")) {
-                fileName += ".pdf"
-            }
+            val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported_Doc_${System.currentTimeMillis()}.pdf"
+            val destDir = File(context.filesDir, "NarayaniDocuments").apply { mkdirs() }
+            val destFile = File(destDir, fileName)
 
-            val docsDir = File(context.filesDir, "Documents")
-            if (!docsDir.exists()) docsDir.mkdirs()
-
-            val destFile = File(docsDir, fileName)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(destFile).use { output ->
                     input.copyTo(output)
                 }
             }
 
-            val pageCount = if (destFile.name.endsWith(".pdf", ignoreCase = true)) {
-                PdfRendererHelper.getPageCountForFile(destFile)
-            } else 1
-
             val entity = PdfEntity(
                 path = destFile.absolutePath,
-                title = destFile.nameWithoutExtension.replace("_", " "),
+                title = destFile.name,
                 uriString = Uri.fromFile(destFile).toString(),
                 sizeBytes = destFile.length(),
-                pageCount = pageCount,
                 lastModifiedTimestamp = destFile.lastModified(),
-                lastOpenedTimestamp = System.currentTimeMillis(),
                 folderName = "Imported"
             )
-            pdfDao.insertPdf(entity)
+            dao.insertPdf(entity)
             entity
         } catch (e: Exception) {
             e.printStackTrace()
@@ -123,86 +94,69 @@ class PdfRepository(private val context: Context) {
         }
     }
 
-    suspend fun addCreatedPdf(file: File, folderName: String = "Tools"): PdfEntity = withContext(Dispatchers.IO) {
-        val pageCount = PdfRendererHelper.getPageCountForFile(file)
+    suspend fun addCreatedPdf(file: File, folderName: String = "Created"): PdfEntity = withContext(Dispatchers.IO) {
         val entity = PdfEntity(
             path = file.absolutePath,
-            title = file.nameWithoutExtension.replace("_", " "),
+            title = file.name,
             uriString = Uri.fromFile(file).toString(),
             sizeBytes = file.length(),
-            pageCount = pageCount,
             lastModifiedTimestamp = file.lastModified(),
-            lastOpenedTimestamp = System.currentTimeMillis(),
             folderName = folderName
         )
-        pdfDao.insertPdf(entity)
+        dao.insertPdf(entity)
         entity
     }
 
-    suspend fun toggleFavorite(path: String, current: Boolean) = withContext(Dispatchers.IO) {
-        pdfDao.updateFavorite(path, !current)
-    }
-
     suspend fun recordOpened(path: String) = withContext(Dispatchers.IO) {
-        pdfDao.updateLastOpened(path, System.currentTimeMillis())
+        dao.updateLastOpened(path, System.currentTimeMillis())
     }
 
-    suspend fun renamePdf(oldPath: String, newName: String): String = withContext(Dispatchers.IO) {
-        val cleanName = if (newName.endsWith(".pdf", ignoreCase = true)) newName else "$newName.pdf"
-        val oldFile = File(oldPath)
-        val newFile = File(oldFile.parentFile, cleanName)
+    suspend fun toggleFavorite(path: String, isFavorite: Boolean) = withContext(Dispatchers.IO) {
+        dao.updateFavorite(path, isFavorite)
+    }
 
-        if (oldFile.renameTo(newFile)) {
-            val title = newFile.nameWithoutExtension.replace("_", " ")
-            pdfDao.renamePdf(oldPath, newFile.absolutePath, title)
-            newFile.absolutePath
-        } else {
-            oldPath
-        }
+    suspend fun setLock(path: String, isLocked: Boolean, pin: String) = withContext(Dispatchers.IO) {
+        dao.updateLock(path, isLocked, pin)
     }
 
     suspend fun deletePdf(path: String) = withContext(Dispatchers.IO) {
-        val file = File(path)
-        if (file.exists()) {
-            file.delete()
+        try {
+            val file = File(path)
+            if (file.exists()) file.delete()
+        } catch (e: Exception) {}
+        dao.deletePdf(path)
+    }
+
+    suspend fun renamePdf(oldPath: String, newName: String): String = withContext(Dispatchers.IO) {
+        val oldFile = File(oldPath)
+        val ext = oldFile.extension
+        val cleanName = if (newName.endsWith(".$ext", true)) newName else "$newName.$ext"
+        val newFile = File(oldFile.parentFile, cleanName)
+
+        if (oldFile.exists()) {
+            oldFile.renameTo(newFile)
         }
-        pdfDao.deletePdf(path)
-    }
 
-    suspend fun setLock(path: String, pin: String) = withContext(Dispatchers.IO) {
-        pdfDao.updateLock(path, isLocked = true, password = pin)
-    }
-
-    suspend fun unlockPdf(path: String) = withContext(Dispatchers.IO) {
-        pdfDao.updateLock(path, isLocked = false, password = "")
-    }
-
-    // Bookmarks
-    fun getBookmarks(pdfPath: String): Flow<List<BookmarkEntity>> = pdfDao.getBookmarksForPdf(pdfPath)
-
-    suspend fun toggleBookmark(pdfPath: String, pageNumber: Int, title: String) = withContext(Dispatchers.IO) {
-        if (pdfDao.isBookmarked(pdfPath, pageNumber)) {
-            pdfDao.deleteBookmark(pdfPath, pageNumber)
-        } else {
-            pdfDao.insertBookmark(
-                BookmarkEntity(
-                    pdfPath = pdfPath,
-                    pageNumber = pageNumber,
-                    title = title
-                )
-            )
-        }
-    }
-
-    suspend fun isPageBookmarked(pdfPath: String, pageNumber: Int): Boolean = withContext(Dispatchers.IO) {
-        pdfDao.isBookmarked(pdfPath, pageNumber)
+        val newUri = Uri.fromFile(newFile).toString()
+        dao.renamePdf(oldPath, newFile.absolutePath, cleanName, newUri)
+        newFile.absolutePath
     }
 
     suspend fun getPdfByPath(path: String): PdfEntity? = withContext(Dispatchers.IO) {
-        pdfDao.getPdfByPath(path)
+        dao.getPdfByPath(path)
     }
 
-    suspend fun updatePdfEntity(entity: PdfEntity) = withContext(Dispatchers.IO) {
-        pdfDao.insertPdf(entity)
+    fun getBookmarksForPdf(path: String): Flow<List<BookmarkEntity>> = dao.getBookmarksForPdf(path)
+
+    suspend fun toggleBookmark(path: String, page: Int, title: String) = withContext(Dispatchers.IO) {
+        if (dao.isBookmarked(path, page)) {
+            dao.deleteBookmark(path, page)
+        } else {
+            dao.insertBookmark(BookmarkEntity(pdfPath = path, pageNumber = page, title = title))
+        }
+    }
+
+    suspend fun isBookmarked(path: String, page: Int): Boolean = withContext(Dispatchers.IO) {
+        dao.isBookmarked(path, page)
     }
 }

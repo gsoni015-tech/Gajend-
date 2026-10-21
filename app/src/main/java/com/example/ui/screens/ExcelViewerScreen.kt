@@ -8,6 +8,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,21 +22,18 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -50,351 +48,229 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.local.PdfEntity
 import com.example.reader.ExcelDocument
 import com.example.reader.OfficeDocumentHelper
-import com.example.ui.components.AdMobBottomBanner
-import com.example.ui.viewmodel.PdfViewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.example.ui.theme.BrandPrimary
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
+import com.example.ui.theme.WhiteMixBackground
+import com.example.ui.theme.WhiteMixBorder
+import com.example.ui.theme.WhiteMixCard
+import com.example.ui.theme.WhiteMixSurface
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExcelViewerScreen(
-    viewModel: PdfViewModel,
-    onNavigateBack: () -> Unit,
+    entity: PdfEntity,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val currentPdf by viewModel.currentPdf.collectAsStateWithLifecycle()
+    BackHandler { onBack() }
 
     var excelDoc by remember { mutableStateOf<ExcelDocument?>(null) }
     var isLoading by remember { mutableStateOf(true) }
-    var activeSheetIndex by remember { mutableIntStateOf(0) }
-    var searchQuery by remember { mutableStateOf("") }
-    var isSearchActive by remember { mutableStateOf(false) }
+    var selectedSheetIndex by remember { mutableIntStateOf(0) }
+    var isListView by remember { mutableStateOf(false) } // Toggle for vertical card list
 
-    var selectedCellCoords by remember { mutableStateOf<Pair<Int, Int>?>(null) } // (row, col)
-    var selectedCellValue by remember { mutableStateOf("") }
-
-    BackHandler {
-        onNavigateBack()
+    LaunchedEffect(entity.path) {
+        isLoading = true
+        excelDoc = OfficeDocumentHelper.parseExcelDocument(File(entity.path))
+        isLoading = false
     }
 
-    LaunchedEffect(currentPdf) {
-        val pdf = currentPdf
-        if (pdf != null) {
-            isLoading = true
-            withContext(Dispatchers.IO) {
-                val file = File(pdf.path)
-                excelDoc = OfficeDocumentHelper.parseExcel(file)
-            }
-            isLoading = false
-        }
-    }
-
-    val horizontalScrollState = rememberScrollState()
-
-    Surface(
+    Scaffold(
         modifier = modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Top Bar
+        containerColor = WhiteMixBackground,
+        topBar = {
             Surface(
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 2.dp,
-                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-            ) {
-                Column {
-                    TopAppBar(
-                        title = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFF10B981)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.TableChart,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Text(
-                                        text = currentPdf?.title ?: "Excel Spreadsheet",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "Excel Spreadsheet Viewer",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = onNavigateBack) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                            }
-                        },
-                        actions = {
-                            IconButton(onClick = { isSearchActive = !isSearchActive }) {
-                                Icon(Icons.Default.Search, contentDescription = "Search in Sheet")
-                            }
-                            IconButton(onClick = { currentPdf?.let { viewModel.sharePdf(context, it) } }) {
-                                Icon(Icons.Default.Share, contentDescription = "Share")
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
-                    )
-
-                    // Search row if active
-                    if (isSearchActive) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedTextField(
-                                value = searchQuery,
-                                onValueChange = { searchQuery = it },
-                                placeholder = { Text("Find cell data in sheet...", fontSize = 13.sp) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp),
-                                singleLine = true,
-                                shape = RoundedCornerShape(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            IconButton(onClick = { isSearchActive = false; searchQuery = "" }) {
-                                Icon(Icons.Default.Close, contentDescription = "Close search")
-                            }
-                        }
-                    }
-
-                    // Sheets Tab Row
-                    excelDoc?.let { doc ->
-                        if (doc.sheets.size > 1) {
-                            ScrollableTabRow(
-                                selectedTabIndex = activeSheetIndex,
-                                edgePadding = 16.dp,
-                                containerColor = MaterialTheme.colorScheme.surface
-                            ) {
-                                doc.sheets.forEachIndexed { index, sheet ->
-                                    Tab(
-                                        selected = activeSheetIndex == index,
-                                        onClick = {
-                                            activeSheetIndex = index
-                                            selectedCellCoords = null
-                                            selectedCellValue = ""
-                                        },
-                                        text = { Text(sheet.sheetName, fontWeight = if (activeSheetIndex == index) FontWeight.Bold else FontWeight.Normal) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Cell Value / Formula Bar
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
-                modifier = Modifier.fillMaxWidth()
+                color = WhiteMixSurface,
+                shadowElevation = 1.dp
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .height(48.dp) // Compact 48dp height
+                        .padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val coordStr = selectedCellCoords?.let { (r, c) ->
-                        val colLetter = ('A'.code + c).toChar()
-                        "$colLetter${r + 1}"
-                    } ?: "fx"
-
-                    Box(
-                        modifier = Modifier
-                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(6.dp))
-                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.size(36.dp)
                     ) {
-                        Text(
-                            text = coordStr,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
                     }
-
-                    Spacer(modifier = Modifier.width(10.dp))
-
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = if (selectedCellValue.isNotBlank()) selectedCellValue else "Tap any cell to view and inspect data",
-                        fontSize = 13.sp,
+                        text = entity.title,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        color = if (selectedCellValue.isNotBlank()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                        modifier = Modifier.weight(1f)
                     )
+
+                    // View Mode Toggle (Table Grid vs Vertical Card List)
+                    IconButton(
+                        onClick = { isListView = !isListView },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isListView) Icons.Default.TableChart else Icons.Default.ViewAgenda,
+                            contentDescription = if (isListView) "Switch to Table Grid" else "Switch to Vertical List",
+                            tint = BrandPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
-
-            // Main Table View
+        }
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
             if (isLoading) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = BrandPrimary)
                 }
             } else {
-                val currentSheet = excelDoc?.sheets?.getOrNull(activeSheetIndex)
-                if (currentSheet == null || (currentSheet.headers.isEmpty() && currentSheet.rows.isEmpty())) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text("No spreadsheet data available in this file", color = Color.Gray)
-                    }
-                } else {
-                    val filteredRows = if (searchQuery.isBlank()) {
-                        currentSheet.rows
-                    } else {
-                        currentSheet.rows.filter { row ->
-                            row.any { cell -> cell.contains(searchQuery, ignoreCase = true) }
-                        }
-                    }
+                excelDoc?.let { doc ->
+                    val sheetNames = doc.sheets.keys.toList()
+                    val currentSheetData = if (sheetNames.isNotEmpty()) doc.sheets[sheetNames[selectedSheetIndex]] else null
 
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        // Horizontal scrollable table container
-                        Row(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .horizontalScroll(horizontalScrollState)
-                        ) {
-                            LazyColumn(
-                                modifier = Modifier
-                                    .testTag("excel_table_grid")
-                                    .border(1.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.surface)
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // Sheet Tabs
+                        if (sheetNames.size > 1) {
+                            TabRow(
+                                selectedTabIndex = selectedSheetIndex,
+                                containerColor = WhiteMixSurface,
+                                modifier = Modifier.height(40.dp)
                             ) {
-                                // Sticky Header Row
-                                item {
-                                    Row(
-                                        modifier = Modifier
-                                            .background(Color(0xFFE2E8F0))
-                                            .border(1.dp, MaterialTheme.colorScheme.outline)
-                                    ) {
-                                        // Row # corner cell
-                                        Box(
-                                            modifier = Modifier
-                                                .size(width = 44.dp, height = 40.dp)
-                                                .border(0.5.dp, Color(0xFFCBD5E1)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text("#", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF475569))
-                                        }
+                                sheetNames.forEachIndexed { index, name ->
+                                    Tab(
+                                        selected = selectedSheetIndex == index,
+                                        onClick = { selectedSheetIndex = index },
+                                        text = { Text(name, fontSize = 12.sp, fontWeight = if (selectedSheetIndex == index) FontWeight.Bold else FontWeight.Normal) }
+                                    )
+                                }
+                            }
+                        }
 
-                                        // Column Headers
-                                        currentSheet.headers.forEachIndexed { colIndex, header ->
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(width = 140.dp, height = 40.dp)
-                                                    .border(0.5.dp, Color(0xFFCBD5E1))
-                                                    .padding(horizontal = 8.dp),
-                                                contentAlignment = Alignment.CenterStart
-                                            ) {
+                        currentSheetData?.let { sheet ->
+                            if (isListView) {
+                                // Vertical Card List View for mobile ease of reading
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentPadding = PaddingValues(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    itemsIndexed(sheet.rows) { rowIndex, rowCells ->
+                                        Surface(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = WhiteMixCard,
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder),
+                                            shadowElevation = 0.5.dp
+                                        ) {
+                                            Column(modifier = Modifier.padding(12.dp)) {
                                                 Text(
-                                                    text = header,
+                                                    text = "Row #${rowIndex + 1}",
+                                                    fontSize = 11.sp,
                                                     fontWeight = FontWeight.Bold,
-                                                    fontSize = 12.sp,
-                                                    color = Color(0xFF0F172A),
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    color = BrandPrimary
                                                 )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                rowCells.forEachIndexed { colIndex, cellVal ->
+                                                    val headerName = sheet.headers.getOrNull(colIndex) ?: "Column ${('A' + colIndex)}"
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(vertical = 2.dp),
+                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                    ) {
+                                                        Text(
+                                                            text = headerName,
+                                                            fontSize = 11.sp,
+                                                            color = TextSecondary,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                        Text(
+                                                            text = cellVal,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            color = TextPrimary,
+                                                            modifier = Modifier.weight(1.5f)
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
-
-                                // Table Rows
-                                itemsIndexed(filteredRows) { rowIndex, rowData ->
-                                    val isEven = rowIndex % 2 == 0
-                                    val rowBg = if (isEven) Color(0xFFFFFFFF) else Color(0xFFF8FAFC)
-
-                                    Row(
-                                        modifier = Modifier
-                                            .background(rowBg)
-                                            .border(0.5.dp, Color(0xFFE2E8F0))
-                                    ) {
-                                        // Row Index Number
-                                        Box(
-                                            modifier = Modifier
-                                                .size(width = 44.dp, height = 42.dp)
-                                                .background(Color(0xFFF1F5F9))
-                                                .border(0.5.dp, Color(0xFFCBD5E1)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = "${rowIndex + 1}",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = Color(0xFF64748B)
-                                            )
+                            } else {
+                                // Horizontal & Vertical Table Grid
+                                val horizontalScrollState = rememberScrollState()
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .horizontalScroll(horizontalScrollState)
+                                ) {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        // Header Row
+                                        item {
+                                            Row(
+                                                modifier = Modifier
+                                                    .background(Color(0xFFF3F4F6))
+                                                    .border(0.5.dp, WhiteMixBorder)
+                                            ) {
+                                                sheet.headers.forEach { header ->
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(130.dp)
+                                                            .border(0.5.dp, WhiteMixBorder)
+                                                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = header,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = TextPrimary
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
 
-                                        // Row Cells
-                                        currentSheet.headers.indices.forEach { colIndex ->
-                                            val cellText = rowData.getOrNull(colIndex) ?: ""
-                                            val isSelected = selectedCellCoords?.first == rowIndex && selectedCellCoords?.second == colIndex
-                                            val isSearchMatch = searchQuery.isNotBlank() && cellText.contains(searchQuery, ignoreCase = true)
-
-                                            val cellBorderColor = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFFE2E8F0)
-                                            val cellBg = when {
-                                                isSelected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                                                isSearchMatch -> Color(0xFFFEF08A)
-                                                else -> Color.Transparent
-                                            }
-
-                                            Box(
+                                        // Data Rows
+                                        itemsIndexed(sheet.rows) { rowIndex, row ->
+                                            Row(
                                                 modifier = Modifier
-                                                    .size(width = 140.dp, height = 42.dp)
-                                                    .background(cellBg)
-                                                    .border(if (isSelected) 1.5.dp else 0.5.dp, cellBorderColor)
-                                                    .clickable {
-                                                        selectedCellCoords = Pair(rowIndex, colIndex)
-                                                        selectedCellValue = cellText
-                                                    }
-                                                    .padding(horizontal = 8.dp),
-                                                contentAlignment = Alignment.CenterStart
+                                                    .background(if (rowIndex % 2 == 0) WhiteMixSurface else Color(0xFFFAFAFA))
+                                                    .border(0.5.dp, WhiteMixBorder)
                                             ) {
-                                                Text(
-                                                    text = cellText,
-                                                    fontSize = 12.sp,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF1E293B),
-                                                    fontWeight = if (isSelected || isSearchMatch) FontWeight.Bold else FontWeight.Normal
-                                                )
+                                                row.forEach { cell ->
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(130.dp)
+                                                            .border(0.5.dp, WhiteMixBorder)
+                                                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = cell,
+                                                            fontSize = 12.sp,
+                                                            color = TextPrimary
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -404,39 +280,6 @@ fun ExcelViewerScreen(
                     }
                 }
             }
-
-            // Stats Footer Bar
-            excelDoc?.sheets?.getOrNull(activeSheetIndex)?.let { sheet ->
-                Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 1.dp,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${sheet.totalRows} Rows • ${sheet.totalColumns} Columns",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "Sheet: ${sheet.sheetName}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF10B981),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            // AdMob Bottom Banner
-            AdMobBottomBanner()
         }
     }
 }
