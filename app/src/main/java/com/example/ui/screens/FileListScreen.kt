@@ -6,22 +6,29 @@ import android.net.Uri
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
+import com.example.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -30,43 +37,56 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.Visibility
+import com.example.ui.components.DocumentThumbnailView
+import com.example.ui.components.DocumentQuickPreviewBottomSheet
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TableChart
+import android.os.Build
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.example.util.PermissionUtils
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -112,48 +132,107 @@ fun FileListScreen(
     val selectedTab by viewModel.selectedTab.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
 
+    val isScanning by viewModel.isScanning.collectAsState()
+    var hasPermission by remember { mutableStateOf(PermissionUtils.hasStoragePermission(context)) }
+    var showPermissionRationaleDialog by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val isNowGranted = PermissionUtils.hasStoragePermission(context)
+                if (isNowGranted != hasPermission) {
+                    hasPermission = isNowGranted
+                }
+                if (isNowGranted) {
+                    viewModel.refreshDocuments()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissionsMap ->
+        val anyGranted = permissionsMap.values.any { it }
+        val isGranted = anyGranted || PermissionUtils.hasStoragePermission(context)
+        hasPermission = isGranted
+        if (isGranted) {
+            viewModel.refreshDocuments()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val granted = PermissionUtils.hasStoragePermission(context)
+        hasPermission = granted
+        if (granted) {
+            viewModel.refreshDocuments()
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                showPermissionRationaleDialog = true
+            } else {
+                permissionLauncher.launch(PermissionUtils.getStandardPermissions())
+            }
+        }
+    }
+
     var showRenameDialogFor by remember { mutableStateOf<PdfEntity?>(null) }
     var showPinDialogFor by remember { mutableStateOf<PdfEntity?>(null) }
     var showDeleteConfirmFor by remember { mutableStateOf<PdfEntity?>(null) }
+    var previewEntityForSheet by remember { mutableStateOf<PdfEntity?>(null) }
+    var isGridView by remember { mutableStateOf(false) }
 
+    // Folder picker: loads file and directly opens it without bottom "imported" toast
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        uri?.let { viewModel.importPdf(it) }
+        uri?.let {
+            viewModel.importPdfAndOpen(it) { openedEntity ->
+                onOpenDocument(openedEntity)
+            }
+        }
     }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = WhiteMixBackground,
         topBar = {
-            // Compact Top Bar (size kam kar di gayi hai)
             Surface(
                 color = WhiteMixSurface,
                 shadowElevation = 1.dp
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .displayCutoutPadding(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp) // Compact 48dp height
-                            .padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .widthIn(max = 860.dp)
                     ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
+                            Image(
+                                painter = painterResource(id = R.drawable.narayani_pdf_logo_1793504887925),
+                                contentDescription = "Narayani Logo",
                                 modifier = Modifier
                                     .size(32.dp)
-                                    .background(BrandPrimary, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PictureAsPdf,
-                                    contentDescription = "App Logo",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = "Narayani PDF",
@@ -165,23 +244,64 @@ fun FileListScreen(
                             )
                         }
 
-                        // Right actions (import)
-                        IconButton(
-                            onClick = { filePicker.launch(arrayOf("application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .testTag("import_document_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Description,
-                                contentDescription = "Import Document",
-                                tint = BrandPrimary,
-                                modifier = Modifier.size(20.dp)
-                            )
+                        // Right actions (Auto-fetch refresh & Open Document from folder)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { viewModel.refreshDocuments() },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("refresh_documents_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Scan Storage",
+                                    tint = BrandPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { isGridView = !isGridView },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("toggle_grid_list_view_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (isGridView) Icons.Default.ViewList else Icons.Default.GridView,
+                                    contentDescription = if (isGridView) "Switch to List View" else "Switch to Grid View",
+                                    tint = BrandPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    filePicker.launch(
+                                        arrayOf(
+                                            "application/pdf",
+                                            "application/msword",
+                                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            "application/vnd.ms-excel",
+                                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            "text/csv"
+                                        )
+                                    )
+                                },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .testTag("open_folder_file_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = "Open File",
+                                    tint = BrandPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
 
-                    // Compact Search Box (search box chota kar diya hai)
+                    // Compact Search Box
                     CompactSearchBox(
                         query = searchQuery,
                         onQueryChange = { viewModel.searchQuery.value = it },
@@ -190,7 +310,7 @@ fun FileListScreen(
                             .padding(horizontal = 16.dp, vertical = 4.dp)
                     )
 
-                    // Category Tabs (Compact)
+                    // English Category Tabs
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -219,70 +339,301 @@ fun FileListScreen(
                             }
                         }
                     }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                 }
             }
         }
     ) { paddingValues ->
-        // Document List - NO banner ads, NO ads between documents!
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .padding(paddingValues),
+            contentAlignment = Alignment.TopCenter
         ) {
-            if (displayedItems.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 860.dp)
+            ) {
+                // Permission Banner (if not granted)
+                if (!hasPermission) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFFEF2F2),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFECACA))
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(24.dp)
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Description,
+                            imageVector = Icons.Default.FolderOpen,
                             contentDescription = null,
-                            tint = TextTertiary,
-                            modifier = Modifier.size(56.dp)
+                            tint = BrandCrimson,
+                            modifier = Modifier.size(26.dp)
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = if (searchQuery.isNotBlank()) "No documents match \"$searchQuery\"" else "No documents found",
-                            color = TextSecondary,
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Storage Permission Needed",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = BrandCrimson
+                            )
+                            Text(
+                                text = "Allow storage permission to automatically scan all documents from memory.",
+                                fontSize = 11.sp,
+                                color = TextSecondary,
+                                lineHeight = 14.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
                         Button(
                             onClick = {
-                                filePicker.launch(arrayOf("application/pdf", "*/*"))
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    PermissionUtils.openStorageAccessSettings(context)
+                                } else {
+                                    permissionLauncher.launch(PermissionUtils.getStandardPermissions())
+                                }
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
-                            shape = RoundedCornerShape(8.dp)
+                            colors = ButtonDefaults.buttonColors(containerColor = BrandCrimson),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
                         ) {
-                            Text("Browse Files • फाइल चुनें", fontSize = 13.sp)
+                            Text("Grant", fontSize = 11.sp)
                         }
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+            }
+
+            // Scanning indicator
+            if (isScanning) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFEFF6FF),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBFDBFE))
                 ) {
-                    items(displayedItems, key = { it.path }) { entity ->
-                        DocumentItemCard(
-                            entity = entity,
-                            onClick = { onOpenDocument(entity) },
-                            onToggleFavorite = { viewModel.toggleFavorite(entity) },
-                            onRename = { showRenameDialogFor = entity },
-                            onDelete = { showDeleteConfirmFor = entity },
-                            onSetPin = { showPinDialogFor = entity },
-                            onShare = { shareDocument(context, entity) }
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            color = BrandPrimary,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Scanning device memory for documents...",
+                            fontSize = 12.sp,
+                            color = BrandPrimary,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }
             }
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (displayedItems.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isScanning) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(24.dp)
+                            ) {
+                                CircularProgressIndicator(color = BrandPrimary)
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = "Scanning device memory for documents...",
+                                    fontSize = 14.sp,
+                                    color = TextSecondary,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        } else if (!hasPermission) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = BrandCrimson,
+                                    modifier = Modifier.size(56.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "Permission Required to Auto-Scan",
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary,
+                                    fontSize = 16.sp
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Please allow storage permission to automatically scan and load files from device memory.",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(
+                                    onClick = {
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                            PermissionUtils.openStorageAccessSettings(context)
+                                        } else {
+                                            permissionLauncher.launch(PermissionUtils.getStandardPermissions())
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Grant Permission & Auto Scan", fontSize = 13.sp)
+                                }
+                            }
+                        } else {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Description,
+                                    contentDescription = null,
+                                    tint = TextTertiary,
+                                    modifier = Modifier.size(56.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = if (searchQuery.isNotBlank()) "No files match \"$searchQuery\"" else "No documents found on device",
+                                    color = TextSecondary,
+                                    fontSize = 14.sp
+                                )
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = { viewModel.refreshDocuments() },
+                                        colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Scan Storage", fontSize = 13.sp)
+                                    }
+                                    Button(
+                                        onClick = {
+                                            filePicker.launch(
+                                                arrayOf(
+                                                    "application/pdf",
+                                                    "application/msword",
+                                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                                    "application/vnd.ms-excel",
+                                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                    "text/csv"
+                                                )
+                                            )
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4B5563)),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Browse Folder", fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (isGridView) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 150.dp),
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(displayedItems, key = { it.path }) { entity ->
+                                DocumentGridItemCard(
+                                    entity = entity,
+                                    onClick = { onOpenDocument(entity) },
+                                    onQuickPreview = { previewEntityForSheet = entity },
+                                    onToggleFavorite = { viewModel.toggleFavorite(entity) },
+                                    onRename = { showRenameDialogFor = entity },
+                                    onDelete = { showDeleteConfirmFor = entity },
+                                    onSetPin = { showPinDialogFor = entity },
+                                    onShare = { shareDocument(context, entity) }
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(displayedItems, key = { it.path }) { entity ->
+                                DocumentItemCard(
+                                    entity = entity,
+                                    onClick = { onOpenDocument(entity) },
+                                    onQuickPreview = { previewEntityForSheet = entity },
+                                    onToggleFavorite = { viewModel.toggleFavorite(entity) },
+                                    onRename = { showRenameDialogFor = entity },
+                                    onDelete = { showDeleteConfirmFor = entity },
+                                    onSetPin = { showPinDialogFor = entity },
+                                    onShare = { shareDocument(context, entity) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+    }
+
+    // Permission Rationale Dialog for Android 11+
+    if (showPermissionRationaleDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionRationaleDialog = false },
+            title = {
+                Text(
+                    text = "Storage Permission Required",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "Narayani PDF Reader requires storage access to automatically scan and load all PDF, Word, and Excel documents saved on your device.",
+                    fontSize = 13.sp,
+                    color = TextSecondary,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPermissionRationaleDialog = false
+                        PermissionUtils.openStorageAccessSettings(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)
+                ) {
+                    Text("Grant Permission")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionRationaleDialog = false }) {
+                    Text("Later")
+                }
+            }
+        )
     }
 
     // Dialogs
@@ -296,7 +647,7 @@ fun FileListScreen(
                     value = newName,
                     onValueChange = { newName = it },
                     singleLine = true,
-                    label = { Text("File Name") },
+                    label = { Text("Document Name") },
                     modifier = Modifier.fillMaxWidth()
                 )
             },
@@ -310,7 +661,7 @@ fun FileListScreen(
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)
                 ) {
-                    Text("Rename")
+                    Text("Save")
                 }
             },
             dismissButton = {
@@ -349,7 +700,7 @@ fun FileListScreen(
         var pin by remember { mutableStateOf(entity.password) }
         AlertDialog(
             onDismissRequest = { showPinDialogFor = null },
-            title = { Text(if (entity.isLocked) "Change/Remove PIN" else "Set Security PIN", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            title = { Text(if (entity.isLocked) "Change or Remove PIN" else "Set Security PIN", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
             text = {
                 Column {
                     Text("Set 4-digit PIN to protect this document. Leave blank to unlock.", fontSize = 13.sp, color = TextSecondary)
@@ -381,6 +732,20 @@ fun FileListScreen(
             }
         )
     }
+
+    // Document Quick Preview Sheet before opening
+    previewEntityForSheet?.let { entity ->
+        DocumentQuickPreviewBottomSheet(
+            entity = entity,
+            onDismissRequest = { previewEntityForSheet = null },
+            onOpenDocument = { doc ->
+                previewEntityForSheet = null
+                onOpenDocument(doc)
+            },
+            onToggleFavorite = { doc -> viewModel.toggleFavorite(doc) },
+            onShareDocument = { doc -> shareDocument(context, doc) }
+        )
+    }
 }
 
 @Composable
@@ -392,7 +757,7 @@ fun CompactSearchBox(
     val focusManager = LocalFocusManager.current
     Surface(
         modifier = modifier
-            .height(38.dp) // Compact 38dp height
+            .height(38.dp)
             .testTag("compact_search_box"),
         shape = RoundedCornerShape(20.dp),
         color = WhiteMixBackground,
@@ -455,6 +820,7 @@ fun CompactSearchBox(
 fun DocumentItemCard(
     entity: PdfEntity,
     onClick: () -> Unit,
+    onQuickPreview: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -462,20 +828,7 @@ fun DocumentItemCard(
     onShare: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
-
-    val iconColor = when (entity.documentType) {
-        DocumentType.PDF -> BrandCrimson
-        DocumentType.WORD -> BrandPrimary
-        DocumentType.EXCEL -> Color(0xFF16A34A)
-        DocumentType.OTHER -> Color(0xFF6B7280)
-    }
-
-    val iconVector = when (entity.documentType) {
-        DocumentType.PDF -> Icons.Default.PictureAsPdf
-        DocumentType.WORD -> Icons.Default.Description
-        DocumentType.EXCEL -> Icons.Default.TableChart
-        DocumentType.OTHER -> Icons.Default.Description
-    }
+    val context = LocalContext.current
 
     Surface(
         modifier = Modifier
@@ -490,23 +843,18 @@ fun DocumentItemCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Icon
-            Box(
+            // First-Page Real Rendered Thumbnail Preview
+            DocumentThumbnailView(
+                entity = entity,
+                width = 46.dp,
+                height = 58.dp,
                 modifier = Modifier
-                    .size(40.dp)
-                    .background(iconColor.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = iconVector,
-                    contentDescription = null,
-                    tint = iconColor,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onQuickPreview)
+            )
 
             Spacer(modifier = Modifier.width(12.dp))
 
@@ -549,7 +897,7 @@ fun DocumentItemCard(
                         color = TextTertiary
                     )
                     Text(
-                        text = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(entity.lastModifiedTimestamp)),
+                        text = SimpleDateFormat("dd MMM yyyy", Locale.ENGLISH).format(Date(entity.lastModifiedTimestamp)),
                         fontSize = 11.sp,
                         color = TextSecondary
                     )
@@ -561,6 +909,21 @@ fun DocumentItemCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+
+            // Quick Preview Eye Button
+            IconButton(
+                onClick = onQuickPreview,
+                modifier = Modifier
+                    .size(32.dp)
+                    .testTag("preview_btn_${entity.title}")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Visibility,
+                    contentDescription = "Quick Preview",
+                    tint = BrandPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
             }
 
             // Favorite Button
@@ -595,22 +958,40 @@ fun DocumentItemCard(
                     onDismissRequest = { menuExpanded = false }
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Share • शेयर करें") },
+                        text = { Text("Quick Preview") },
+                        onClick = {
+                            menuExpanded = false
+                            onQuickPreview()
+                        },
+                        leadingIcon = { Icon(Icons.Default.Visibility, null, modifier = Modifier.size(18.dp)) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share") },
                         onClick = {
                             menuExpanded = false
                             onShare()
                         },
                         leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) }
                     )
+                    if (entity.documentType == DocumentType.PDF) {
+                        DropdownMenuItem(
+                            text = { Text("Print") },
+                            onClick = {
+                                menuExpanded = false
+                                com.example.pdf.PdfPrintHelper.printPdf(context, File(entity.path), entity.uriString, entity.title)
+                            },
+                            leadingIcon = { Icon(Icons.Default.Print, null, modifier = Modifier.size(18.dp)) }
+                        )
+                    }
                     DropdownMenuItem(
-                        text = { Text("Rename • नाम बदलें") },
+                        text = { Text("Rename") },
                         onClick = {
                             menuExpanded = false
                             onRename()
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text(if (entity.isLocked) "Change PIN • पिन बदलें" else "Lock PIN • लॉक करें") },
+                        text = { Text(if (entity.isLocked) "Change PIN" else "Lock with PIN") },
                         onClick = {
                             menuExpanded = false
                             onSetPin()
@@ -618,13 +999,196 @@ fun DocumentItemCard(
                         leadingIcon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp)) }
                     )
                     DropdownMenuItem(
-                        text = { Text("Delete • हटाएं", color = BrandCrimson) },
+                        text = { Text("Delete", color = BrandCrimson) },
                         onClick = {
                             menuExpanded = false
                             onDelete()
                         },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = BrandCrimson, modifier = Modifier.size(18.dp)) }
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 2-Column Grid Item Card with prominent Cover Page Thumbnail Preview
+ */
+@Composable
+fun DocumentGridItemCard(
+    entity: PdfEntity,
+    onClick: () -> Unit,
+    onQuickPreview: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onSetPin: () -> Unit,
+    onShare: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("document_grid_card_${entity.title}")
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        color = WhiteMixCard,
+        shadowElevation = 1.dp,
+        border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+        ) {
+            // Large Thumbnail Preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(145.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFFF3F4F6))
+                    .clickable(onClick = onQuickPreview),
+                contentAlignment = Alignment.Center
+            ) {
+                DocumentThumbnailView(
+                    entity = entity,
+                    width = 130.dp,
+                    height = 145.dp,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // Quick Preview Pill on overlay
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.65f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Visibility,
+                            contentDescription = "Quick Preview",
+                            tint = Color.White,
+                            modifier = Modifier.size(11.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = "Preview",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Document Title
+            Text(
+                text = entity.title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 17.sp,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Meta & Actions Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = Formatter.formatFileSize(context, entity.sizeBytes),
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (entity.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "Favorite",
+                            tint = if (entity.isFavorite) BrandCrimson else TextTertiary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Box {
+                        IconButton(
+                            onClick = { menuExpanded = true },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "More",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Quick Preview") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onQuickPreview()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Visibility, null, modifier = Modifier.size(18.dp)) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Share") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onShare()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Rename") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onRename()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (entity.isLocked) "Change PIN" else "Lock with PIN") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onSetPin()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp)) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete", color = BrandCrimson) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDelete()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Delete, null, tint = BrandCrimson, modifier = Modifier.size(18.dp)) }
+                            )
+                        }
+                    }
                 }
             }
         }

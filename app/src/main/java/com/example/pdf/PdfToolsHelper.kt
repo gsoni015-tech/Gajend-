@@ -281,7 +281,8 @@ object PdfToolsHelper {
 
     suspend fun extractTextFromPage(file: File, pageIndex: Int): String = withContext(Dispatchers.IO) {
         try {
-            "Text extraction completed for page ${pageIndex + 1}."
+            val result = com.example.pdf.text.PdfTextExtractor.extractPageText(file, pageIndex, 1)
+            if (result.text.isNotBlank()) result.text else "No extractable text found on this page."
         } catch (e: Exception) {
             "Error extracting text: ${e.message}"
         }

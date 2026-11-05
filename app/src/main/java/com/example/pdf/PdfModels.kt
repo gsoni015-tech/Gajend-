@@ -37,14 +37,14 @@ data class SignatureAnnotation(
 )
 
 enum class StampType(val title: String, val color: Long) {
-    APPROVED("APPROVED • स्वीकृत", 0xFF16A34A),
-    REJECTED("REJECTED • अस्वीकृत", 0xFFDC2626),
-    CONFIDENTIAL("CONFIDENTIAL • गोपनीय", 0xFF9333EA),
-    DRAFT("DRAFT • प्रारूप", 0xFF4B5563),
-    URGENT("URGENT • तुरंत", 0xFFEA580C),
-    OFFICIAL("OFFICIAL SEAL • शासकीय", 0xFF1E3A8A),
-    VERIFIED("VERIFIED • सत्यापित", 0xFF0D9488),
-    CUSTOM("CUSTOM • कस्टम", 0xFF1F2937)
+    APPROVED("APPROVED", 0xFF16A34A),
+    REJECTED("REJECTED", 0xFFDC2626),
+    CONFIDENTIAL("CONFIDENTIAL", 0xFF9333EA),
+    DRAFT("DRAFT", 0xFF4B5563),
+    URGENT("URGENT", 0xFFEA580C),
+    OFFICIAL("OFFICIAL SEAL", 0xFF1E3A8A),
+    VERIFIED("VERIFIED", 0xFF0D9488),
+    CUSTOM("CUSTOM", 0xFF1F2937)
 }
 
 data class StampAnnotation(

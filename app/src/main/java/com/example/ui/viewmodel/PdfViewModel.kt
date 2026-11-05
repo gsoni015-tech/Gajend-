@@ -20,19 +20,19 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 enum class FileListTab(val title: String) {
-    ALL("All Docs • सभी"),
+    ALL("All Documents"),
     PDF("PDF"),
     WORD("Word"),
     EXCEL("Excel"),
-    RECENT("Recent • हाल ही के"),
-    FAVORITES("Favorites • पसंदीदा")
+    RECENT("Recent"),
+    FAVORITES("Favorites")
 }
 
 enum class SortMode(val title: String) {
-    DATE_DESC("Date (Newest first)"),
-    NAME_ASC("Name (A to Z)"),
-    NAME_DESC("Name (Z to A)"),
-    SIZE_DESC("Size (Largest first)")
+    DATE_DESC("Date (Newest)"),
+    NAME_ASC("Name (A-Z)"),
+    NAME_DESC("Name (Z-A)"),
+    SIZE_DESC("Size (Largest)")
 }
 
 enum class ViewMode {
@@ -40,9 +40,9 @@ enum class ViewMode {
 }
 
 enum class ReaderThemeMode(val title: String) {
-    LIGHT("Day (White)"),
-    SEPIA("Sepia (Eye Care)"),
-    DARK("Night (Dark)")
+    LIGHT("Day Mode"),
+    SEPIA("Sepia Mode"),
+    DARK("Night Mode")
 }
 
 class PdfViewModel(application: Application) : AndroidViewModel(application) {
@@ -60,6 +60,7 @@ class PdfViewModel(application: Application) : AndroidViewModel(application) {
     val currentBookmarkStatus = MutableStateFlow(false)
     val currentBookmarks = MutableStateFlow<List<BookmarkEntity>>(emptyList())
 
+    val isScanning = MutableStateFlow(false)
     val isProcessing = MutableStateFlow(false)
     val progressMessage = MutableStateFlow("")
 
@@ -69,7 +70,7 @@ class PdfViewModel(application: Application) : AndroidViewModel(application) {
         emptyList()
     )
 
-    // Filtered documents list without any advertisements between documents
+    // Filtered documents list in pure English without any dummy items or ads
     val displayedItems: StateFlow<List<PdfEntity>> = combine(
         allPdfs,
         selectedTab,
@@ -99,14 +100,23 @@ class PdfViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            repository.initialize()
-            repository.autoFetchDeviceDocuments()
+            isScanning.value = true
+            try {
+                repository.initialize()
+            } finally {
+                isScanning.value = false
+            }
         }
     }
 
     fun refreshDocuments() {
         viewModelScope.launch {
-            repository.autoFetchDeviceDocuments()
+            isScanning.value = true
+            try {
+                repository.autoFetchDeviceDocuments()
+            } finally {
+                isScanning.value = false
+            }
         }
     }
 
@@ -144,6 +154,33 @@ class PdfViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun lockOrUnlockPdfByUri(uri: Uri, pin: String, onComplete: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            isProcessing.value = true
+            progressMessage.value = "Updating document PIN..."
+            try {
+                val entity = repository.importPdfFromUri(uri)
+                if (entity != null) {
+                    repository.setLock(entity.path, pin.isNotBlank(), pin)
+                    Toast.makeText(
+                        getApplication(),
+                        if (pin.isNotBlank()) "PIN lock set for ${entity.title}" else "PIN removed for ${entity.title}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    onComplete(true)
+                } else {
+                    Toast.makeText(getApplication(), "Could not load selected document", Toast.LENGTH_SHORT).show()
+                    onComplete(false)
+                }
+            } catch (e: Exception) {
+                Toast.makeText(getApplication(), "Security error: ${e.message}", Toast.LENGTH_SHORT).show()
+                onComplete(false)
+            } finally {
+                isProcessing.value = false
+            }
+        }
+    }
+
     fun deletePdf(entity: PdfEntity) {
         viewModelScope.launch {
             repository.deletePdf(entity.path)
@@ -169,16 +206,20 @@ class PdfViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importPdf(uri: Uri) {
+    /**
+     * Imports PDF without showing any toast message and opens it immediately!
+     */
+    fun importPdfAndOpen(uri: Uri, onOpened: (PdfEntity) -> Unit) {
         viewModelScope.launch {
             val entity = repository.importPdfFromUri(uri)
             if (entity != null) {
-                Toast.makeText(getApplication(), "Imported: ${entity.title}", Toast.LENGTH_SHORT).show()
+                // Open immediately without showing any bottom "imported" toast
+                openPdf(entity)
+                onOpened(entity)
             }
         }
     }
 
-    // PDF to JPG conversion feature
     fun executePdfToJpg(
         context: Context,
         pdfFile: File,

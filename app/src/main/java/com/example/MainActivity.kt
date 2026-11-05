@@ -6,7 +6,9 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
@@ -17,11 +19,19 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
@@ -53,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ads.AdMobManager
+import com.example.ads.AdaptiveBannerAdView
 import com.example.data.local.DocumentType
 import com.example.data.local.PdfEntity
 import com.example.ui.screens.ExcelViewerScreen
@@ -73,8 +84,8 @@ import com.example.util.PermissionUtils
 import java.io.File
 
 enum class MainNavTab(val title: String, val icon: ImageVector) {
-    FILES("Documents • फाइलें", Icons.Default.Description),
-    TOOLS("Tools • टूल्स", Icons.Default.Build)
+    FILES("Documents", Icons.Default.Description),
+    TOOLS("Tools", Icons.Default.Build)
 }
 
 sealed class AppScreen {
@@ -87,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: PdfViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         AdMobManager.initialize(this)
 
@@ -108,7 +120,7 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_VIEW) {
             val uri: Uri? = intent.data
-            uri?.let { viewModel.importPdf(it) }
+            uri?.let { viewModel.importPdfAndOpen(it) { } }
         }
     }
 }
@@ -117,6 +129,10 @@ class MainActivity : ComponentActivity() {
 fun MainAppContent(viewModel: PdfViewModel) {
     var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
     var selectedNavTab by remember { mutableStateOf(MainNavTab.FILES) }
+
+    BackHandler(enabled = currentScreen is AppScreen.Main && selectedNavTab != MainNavTab.FILES) {
+        selectedNavTab = MainNavTab.FILES
+    }
 
     var pendingLockEntity by remember { mutableStateOf<PdfEntity?>(null) }
     var pinInput by remember { mutableStateOf("") }
@@ -182,44 +198,61 @@ fun MainAppContent(viewModel: PdfViewModel) {
         is AppScreen.Main -> {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),
+                contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
                 bottomBar = {
-                    // Compact Bottom Bar (User requested: "Top or bottom ki size kam kar do" - 54dp height)
-                    Surface(
-                        color = WhiteMixSurface,
-                        shadowElevation = 4.dp,
-                        border = androidx.compose.foundation.BorderStroke(0.5.dp, WhiteMixBorder)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding(),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(54.dp) // Compact 54dp height
-                                .padding(horizontal = 24.dp),
-                            horizontalArrangement = Arrangement.SpaceAround,
-                            verticalAlignment = Alignment.CenterVertically
+                        AdaptiveBannerAdView(modifier = Modifier.fillMaxWidth().widthIn(max = 728.dp))
+
+                        // Compact Bottom Navigation Bar centered on wide screens
+                        Surface(
+                            color = WhiteMixSurface,
+                            shadowElevation = 4.dp,
+                            border = androidx.compose.foundation.BorderStroke(0.5.dp, WhiteMixBorder),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            MainNavTab.entries.forEach { tab ->
-                                val isSelected = tab == selectedNavTab
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable { selectedNavTab = tab }
-                                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                                        .testTag("nav_tab_${tab.name.lowercase()}")
+                                        .fillMaxWidth()
+                                        .widthIn(max = 560.dp)
+                                        .height(54.dp) // Compact 54dp height
+                                        .padding(horizontal = 24.dp),
+                                    horizontalArrangement = Arrangement.SpaceAround,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = tab.icon,
-                                        contentDescription = tab.title,
-                                        tint = if (isSelected) BrandPrimary else TextSecondary,
-                                        modifier = Modifier.size(20.dp) // Compact 20dp icon
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = tab.title,
-                                        fontSize = 11.sp, // Compact label
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isSelected) BrandPrimary else TextSecondary
-                                    )
+                                    MainNavTab.entries.forEach { tab ->
+                                        val isSelected = tab == selectedNavTab
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { selectedNavTab = tab }
+                                                .padding(horizontal = 16.dp, vertical = 4.dp)
+                                                .testTag("nav_tab_${tab.name.lowercase()}")
+                                        ) {
+                                            Icon(
+                                                imageVector = tab.icon,
+                                                contentDescription = tab.title,
+                                                tint = if (isSelected) BrandPrimary else TextSecondary,
+                                                modifier = Modifier.size(20.dp) // Compact 20dp icon
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = tab.title,
+                                                fontSize = 11.sp, // Compact label
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) BrandPrimary else TextSecondary
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -229,22 +262,29 @@ fun MainAppContent(viewModel: PdfViewModel) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(padding)
+                        .padding(bottom = padding.calculateBottomPadding()),
+                    contentAlignment = Alignment.TopCenter
                 ) {
-                    when (selectedNavTab) {
-                        MainNavTab.FILES -> {
-                            FileListScreen(
-                                viewModel = viewModel,
-                                onOpenDocument = { checkAndOpenDocument(it) }
-                            )
-                        }
-                        MainNavTab.TOOLS -> {
-                            PdfToolsScreen(
-                                viewModel = viewModel,
-                                onNavigateToEditWithFile = { file ->
-                                    currentScreen = AppScreen.Editor(file)
-                                }
-                            )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .widthIn(max = 860.dp)
+                    ) {
+                        when (selectedNavTab) {
+                            MainNavTab.FILES -> {
+                                FileListScreen(
+                                    viewModel = viewModel,
+                                    onOpenDocument = { checkAndOpenDocument(it) }
+                                )
+                            }
+                            MainNavTab.TOOLS -> {
+                                PdfToolsScreen(
+                                    viewModel = viewModel,
+                                    onNavigateToEditWithFile = { file ->
+                                        currentScreen = AppScreen.Editor(file)
+                                    }
+                                )
+                            }
                         }
                     }
                 }

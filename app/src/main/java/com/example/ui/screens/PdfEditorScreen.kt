@@ -20,14 +20,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
@@ -39,6 +43,7 @@ import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -117,9 +122,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
+import android.app.Activity
+import com.example.ads.AdMobManager
+
 enum class EditorToolMode {
     VIEW, DRAW, HIGHLIGHT, TEXT, SIGNATURE, STAMP, WATERMARK
 }
+
+private data class EditorHistorySnapshot(
+    val pageIndex: Int,
+    val state: PageEditState
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -129,12 +142,22 @@ fun PdfEditorScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BackHandler { onBack() }
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val activity = context as? Activity
+    val handleBack: () -> Unit = {
+        if (activity != null) {
+            AdMobManager.showBackPressInterstitial(activity) { onBack() }
+        } else {
+            onBack()
+        }
+    }
+
+    BackHandler { handleBack() }
 
     var activeTool by remember { mutableStateOf(EditorToolMode.VIEW) }
     var selectedColor by remember { mutableStateOf(0xFF1E3A8A) }
+    var selectedHighlightColor by remember { mutableStateOf(0xFFFFEE58) }
     var strokeWidth by remember { mutableFloatStateOf(5f) }
 
     var renderer by remember { mutableStateOf<PdfRenderer?>(null) }
@@ -195,12 +218,83 @@ fun PdfEditorScreen(
         }
     }
 
+    val undoStack = remember { mutableStateListOf<EditorHistorySnapshot>() }
+    val redoStack = remember { mutableStateListOf<EditorHistorySnapshot>() }
+
     fun syncCurrentPageState() {
         val current = pageEditStates[currentPageIndex] ?: PageEditState(
             pageId = "page_$currentPageIndex",
             originalPageIndex = currentPageIndex
         )
         pageEditStates[currentPageIndex] = current.copy(strokes = currentStrokes.toList())
+    }
+
+    fun recordHistoryState(targetPage: Int = currentPageIndex) {
+        val current = pageEditStates[targetPage] ?: PageEditState(
+            pageId = "page_$targetPage",
+            originalPageIndex = targetPage
+        )
+        val snapshotState = if (targetPage == currentPageIndex) {
+            current.copy(strokes = currentStrokes.toList())
+        } else {
+            current
+        }
+        undoStack.add(EditorHistorySnapshot(targetPage, snapshotState))
+        redoStack.clear()
+    }
+
+    fun undo() {
+        if (undoStack.isNotEmpty()) {
+            val targetSnapshot = undoStack.removeAt(undoStack.lastIndex)
+            val currentPageState = pageEditStates[targetSnapshot.pageIndex] ?: PageEditState(
+                pageId = "page_${targetSnapshot.pageIndex}",
+                originalPageIndex = targetSnapshot.pageIndex
+            )
+            val stateBeforeUndo = if (currentPageIndex == targetSnapshot.pageIndex) {
+                currentPageState.copy(strokes = currentStrokes.toList())
+            } else {
+                currentPageState
+            }
+            redoStack.add(EditorHistorySnapshot(targetSnapshot.pageIndex, stateBeforeUndo))
+
+            pageEditStates[targetSnapshot.pageIndex] = targetSnapshot.state
+            if (currentPageIndex == targetSnapshot.pageIndex) {
+                currentStrokes.clear()
+                currentStrokes.addAll(targetSnapshot.state.strokes)
+            } else {
+                currentPageIndex = targetSnapshot.pageIndex
+            }
+            Toast.makeText(context, "Action Undone", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Nothing to undo", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun redo() {
+        if (redoStack.isNotEmpty()) {
+            val targetSnapshot = redoStack.removeAt(redoStack.lastIndex)
+            val currentPageState = pageEditStates[targetSnapshot.pageIndex] ?: PageEditState(
+                pageId = "page_${targetSnapshot.pageIndex}",
+                originalPageIndex = targetSnapshot.pageIndex
+            )
+            val stateBeforeRedo = if (currentPageIndex == targetSnapshot.pageIndex) {
+                currentPageState.copy(strokes = currentStrokes.toList())
+            } else {
+                currentPageState
+            }
+            undoStack.add(EditorHistorySnapshot(targetSnapshot.pageIndex, stateBeforeRedo))
+
+            pageEditStates[targetSnapshot.pageIndex] = targetSnapshot.state
+            if (currentPageIndex == targetSnapshot.pageIndex) {
+                currentStrokes.clear()
+                currentStrokes.addAll(targetSnapshot.state.strokes)
+            } else {
+                currentPageIndex = targetSnapshot.pageIndex
+            }
+            Toast.makeText(context, "Action Redone", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Nothing to redo", Toast.LENGTH_SHORT).show()
+        }
     }
 
     Scaffold(
@@ -211,17 +305,25 @@ fun PdfEditorScreen(
                 color = WhiteMixSurface,
                 shadowElevation = 1.dp
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp) // Compact 48dp height
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .statusBarsPadding()
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp) // Compact 48dp height
+                            .padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
                         IconButton(
-                            onClick = onBack,
+                            onClick = handleBack,
                             modifier = Modifier
                                 .size(36.dp)
                                 .testTag("editor_back_button")
@@ -231,9 +333,11 @@ fun PdfEditorScreen(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Edit: ${file.nameWithoutExtension}",
-                            fontSize = 14.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -244,13 +348,44 @@ fun PdfEditorScreen(
                                 text = "${currentPageIndex + 1}/$pageCount",
                                 fontSize = 11.sp,
                                 color = TextSecondary,
-                                modifier = Modifier.padding(end = 8.dp)
+                                modifier = Modifier.padding(end = 4.dp)
+                            )
+                        }
+
+                        // Undo button
+                        IconButton(
+                            onClick = { undo() },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("editor_undo_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Undo,
+                                contentDescription = "Undo",
+                                tint = if (undoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.5f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Redo button
+                        IconButton(
+                            onClick = { redo() },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("editor_redo_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Redo,
+                                contentDescription = "Redo",
+                                tint = if (redoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.5f),
+                                modifier = Modifier.size(20.dp)
                             )
                         }
 
                         // Rotate button
                         IconButton(
                             onClick = {
+                                recordHistoryState()
                                 val current = pageEditStates[currentPageIndex] ?: PageEditState(
                                     pageId = "page_$currentPageIndex",
                                     originalPageIndex = currentPageIndex
@@ -259,7 +394,9 @@ fun PdfEditorScreen(
                                     rotationDegrees = (current.rotationDegrees + 90) % 360
                                 )
                             },
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("editor_rotate_button")
                         ) {
                             Icon(Icons.Default.RotateRight, contentDescription = "Rotate", tint = BrandPrimary, modifier = Modifier.size(20.dp))
                         }
@@ -297,74 +434,279 @@ fun PdfEditorScreen(
                     }
                 }
             }
-        },
+        }
+    },
         bottomBar = {
-            // Compact Editor Toolbar (56dp)
-            Surface(
-                color = WhiteMixSurface,
-                shadowElevation = 3.dp,
-                border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .padding(horizontal = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceAround,
-                    verticalAlignment = Alignment.CenterVertically
+            Column(modifier = Modifier.navigationBarsPadding()) {
+                if (activeTool == EditorToolMode.DRAW) {
+                    Surface(
+                        color = WhiteMixSurface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder),
+                        shadowElevation = 2.dp
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val drawColors = listOf(
+                                    0xFF1E3A8A, // Navy
+                                    0xFFDC2626, // Crimson
+                                    0xFF16A34A, // Green
+                                    0xFF000000, // Black
+                                    0xFFD97706, // Amber
+                                    0xFF7C3AED  // Purple
+                                )
+                                drawColors.forEach { colorVal ->
+                                    val isSelected = selectedColor == colorVal
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(colorVal))
+                                            .border(
+                                                width = if (isSelected) 2.5.dp else 1.dp,
+                                                color = if (isSelected) BrandCrimson else Color.LightGray,
+                                                shape = CircleShape
+                                            )
+                                            .clickable { selectedColor = colorVal }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val widths = listOf(3f, 6f, 10f)
+                                widths.forEach { w ->
+                                    val isSel = strokeWidth == w
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isSel) BrandPrimary.copy(alpha = 0.15f) else Color.Transparent)
+                                            .border(
+                                                width = 1.dp,
+                                                color = if (isSel) BrandPrimary else Color.LightGray,
+                                                shape = RoundedCornerShape(6.dp)
+                                            )
+                                            .clickable { strokeWidth = w }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(16.dp)
+                                                .height(w.dp)
+                                                .background(Color(selectedColor), RoundedCornerShape(2.dp))
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = { undo() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.Undo,
+                                        contentDescription = "Undo",
+                                        tint = if (undoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.4f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { redo() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.Redo,
+                                        contentDescription = "Redo",
+                                        tint = if (redoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.4f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (activeTool == EditorToolMode.HIGHLIGHT) {
+                    Surface(
+                        color = WhiteMixSurface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder),
+                        shadowElevation = 2.dp
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val highlightColors = listOf(
+                                    0xFFFFEE58, // Yellow
+                                    0xFF86EFAC, // Light Green
+                                    0xFFF472B6, // Pink
+                                    0xFF67E8F9  // Cyan
+                                )
+                                highlightColors.forEach { colorVal ->
+                                    val isSelected = selectedHighlightColor == colorVal
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(colorVal))
+                                            .border(
+                                                width = if (isSelected) 2.5.dp else 1.dp,
+                                                color = if (isSelected) BrandCrimson else Color.LightGray,
+                                                shape = CircleShape
+                                            )
+                                            .clickable { selectedHighlightColor = colorVal }
+                                    )
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Highlight",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextSecondary,
+                                    modifier = Modifier.padding(end = 4.dp)
+                                )
+                                IconButton(
+                                    onClick = { undo() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.Undo,
+                                        contentDescription = "Undo",
+                                        tint = if (undoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.4f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { redo() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.Redo,
+                                        contentDescription = "Redo",
+                                        tint = if (redoStack.isNotEmpty()) BrandPrimary else TextSecondary.copy(alpha = 0.4f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Compact Editor Toolbar (54dp) with Undo and Redo included
+                Surface(
+                    color = WhiteMixSurface,
+                    shadowElevation = 3.dp,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, WhiteMixBorder)
                 ) {
-                    EditorToolButton(
-                        icon = Icons.Default.Draw,
-                        label = "Draw",
-                        isActive = activeTool == EditorToolMode.DRAW,
-                        onClick = {
-                            activeTool = if (activeTool == EditorToolMode.DRAW) EditorToolMode.VIEW else EditorToolMode.DRAW
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp)
+                            .padding(horizontal = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        item {
+                            EditorToolButton(
+                                icon = Icons.AutoMirrored.Filled.Undo,
+                                label = "Undo",
+                                isActive = false,
+                                isEnabled = undoStack.isNotEmpty(),
+                                onClick = { undo() }
+                            )
                         }
-                    )
-                    EditorToolButton(
-                        icon = Icons.Default.Highlight,
-                        label = "Highlight",
-                        isActive = activeTool == EditorToolMode.HIGHLIGHT,
-                        onClick = {
-                            activeTool = if (activeTool == EditorToolMode.HIGHLIGHT) EditorToolMode.VIEW else EditorToolMode.HIGHLIGHT
+                        item {
+                            EditorToolButton(
+                                icon = Icons.AutoMirrored.Filled.Redo,
+                                label = "Redo",
+                                isActive = false,
+                                isEnabled = redoStack.isNotEmpty(),
+                                onClick = { redo() }
+                            )
                         }
-                    )
-                    EditorToolButton(
-                        icon = Icons.Default.TextFields,
-                        label = "Text",
-                        isActive = activeTool == EditorToolMode.TEXT,
-                        onClick = {
-                            activeTool = EditorToolMode.TEXT
-                            showTextDialog = true
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.Draw,
+                                label = "Draw",
+                                isActive = activeTool == EditorToolMode.DRAW,
+                                onClick = {
+                                    activeTool = if (activeTool == EditorToolMode.DRAW) EditorToolMode.VIEW else EditorToolMode.DRAW
+                                }
+                            )
                         }
-                    )
-                    EditorToolButton(
-                        icon = Icons.Default.Create,
-                        label = "Signature",
-                        isActive = activeTool == EditorToolMode.SIGNATURE,
-                        onClick = {
-                            activeTool = EditorToolMode.SIGNATURE
-                            showSignatureDialog = true
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.Highlight,
+                                label = "Highlight",
+                                isActive = activeTool == EditorToolMode.HIGHLIGHT,
+                                onClick = {
+                                    activeTool = if (activeTool == EditorToolMode.HIGHLIGHT) EditorToolMode.VIEW else EditorToolMode.HIGHLIGHT
+                                }
+                            )
                         }
-                    )
-                    EditorToolButton(
-                        icon = Icons.Default.Verified,
-                        label = "Stamp",
-                        isActive = activeTool == EditorToolMode.STAMP,
-                        onClick = {
-                            activeTool = EditorToolMode.STAMP
-                            showStampDialog = true
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.TextFields,
+                                label = "Text",
+                                isActive = activeTool == EditorToolMode.TEXT,
+                                onClick = {
+                                    activeTool = EditorToolMode.TEXT
+                                    showTextDialog = true
+                                }
+                            )
                         }
-                    )
-                    EditorToolButton(
-                        icon = Icons.Default.FormatColorFill,
-                        label = "Watermark",
-                        isActive = activeTool == EditorToolMode.WATERMARK,
-                        onClick = {
-                            activeTool = EditorToolMode.WATERMARK
-                            showWatermarkDialog = true
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.Create,
+                                label = "Signature",
+                                isActive = activeTool == EditorToolMode.SIGNATURE,
+                                onClick = {
+                                    activeTool = EditorToolMode.SIGNATURE
+                                    showSignatureDialog = true
+                                }
+                            )
                         }
-                    )
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.Verified,
+                                label = "Stamp",
+                                isActive = activeTool == EditorToolMode.STAMP,
+                                onClick = {
+                                    activeTool = EditorToolMode.STAMP
+                                    showStampDialog = true
+                                }
+                            )
+                        }
+                        item {
+                            EditorToolButton(
+                                icon = Icons.Default.FormatColorFill,
+                                label = "Watermark",
+                                isActive = activeTool == EditorToolMode.WATERMARK,
+                                onClick = {
+                                    activeTool = EditorToolMode.WATERMARK
+                                    showWatermarkDialog = true
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -408,10 +750,11 @@ fun PdfEditorScreen(
                                             if (livePoints.isNotEmpty()) {
                                                 val stroke = DrawingStroke(
                                                     points = livePoints,
-                                                    color = if (activeTool == EditorToolMode.HIGHLIGHT) 0xFFFFEE58 else selectedColor,
+                                                    color = if (activeTool == EditorToolMode.HIGHLIGHT) selectedHighlightColor else selectedColor,
                                                     strokeWidth = if (activeTool == EditorToolMode.HIGHLIGHT) strokeWidth * 3f else strokeWidth,
                                                     isHighlighter = (activeTool == EditorToolMode.HIGHLIGHT)
                                                 )
+                                                recordHistoryState()
                                                 currentStrokes.add(stroke)
                                                 syncCurrentPageState()
                                                 livePoints = emptyList()
@@ -475,7 +818,7 @@ fun PdfEditorScreen(
                                 }
                                 drawPath(
                                     path = path,
-                                    color = if (activeTool == EditorToolMode.HIGHLIGHT) Color.Yellow.copy(alpha = 0.5f) else Color(selectedColor),
+                                    color = if (activeTool == EditorToolMode.HIGHLIGHT) Color(selectedHighlightColor).copy(alpha = 0.5f) else Color(selectedColor),
                                     style = Stroke(width = if (activeTool == EditorToolMode.HIGHLIGHT) strokeWidth * 3f else strokeWidth)
                                 )
                             }
@@ -565,7 +908,7 @@ fun PdfEditorScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text("Select Font • फॉन्ट चुनें:", fontSize = 12.sp, color = TextSecondary)
+                    Text("Select Font:", fontSize = 12.sp, color = TextSecondary)
                     Spacer(modifier = Modifier.height(4.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(AppFonts.SupportedFont.entries.toTypedArray()) { font ->
@@ -583,6 +926,7 @@ fun PdfEditorScreen(
                 Button(
                     onClick = {
                         if (annotationText.isNotBlank()) {
+                            recordHistoryState()
                             val newAnn = TextAnnotation(
                                 id = "text_${System.currentTimeMillis()}",
                                 text = annotationText,
@@ -623,7 +967,7 @@ fun PdfEditorScreen(
 
         AlertDialog(
             onDismissRequest = { showStampDialog = false },
-            title = { Text("Official Stamp • शासकीय सील", fontWeight = FontWeight.Bold) },
+            title = { Text("Official Stamp", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
                     StampType.entries.forEach { st ->
@@ -647,6 +991,7 @@ fun PdfEditorScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        recordHistoryState()
                         val newStamp = StampAnnotation(
                             id = "stamp_${System.currentTimeMillis()}",
                             stampType = selectedStampType,
@@ -676,10 +1021,10 @@ fun PdfEditorScreen(
 
     // Watermark Dialog
     if (showWatermarkDialog) {
-        var watermarkText by remember { mutableStateOf("CONFIDENTIAL • गोपनीय") }
+        var watermarkText by remember { mutableStateOf("CONFIDENTIAL") }
         AlertDialog(
             onDismissRequest = { showWatermarkDialog = false },
-            title = { Text("Background Watermark • वॉटरमार्क", fontWeight = FontWeight.Bold) },
+            title = { Text("Background Watermark", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
                     OutlinedTextField(
@@ -695,6 +1040,7 @@ fun PdfEditorScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        recordHistoryState()
                         val config = WatermarkConfig(text = watermarkText)
                         val current = pageEditStates[currentPageIndex] ?: PageEditState(
                             pageId = "page_$currentPageIndex",
@@ -719,7 +1065,7 @@ fun PdfEditorScreen(
         val sigPoints = remember { mutableStateListOf<DrawingPoint>() }
         AlertDialog(
             onDismissRequest = { showSignatureDialog = false },
-            title = { Text("Sign Document • डिजिटल हस्ताक्षर", fontWeight = FontWeight.Bold) },
+            title = { Text("Sign Document", fontWeight = FontWeight.Bold) },
             text = {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(
@@ -761,6 +1107,7 @@ fun PdfEditorScreen(
                 Button(
                     onClick = {
                         if (sigPoints.isNotEmpty()) {
+                            recordHistoryState()
                             val stroke = DrawingStroke(
                                 points = sigPoints.toList(),
                                 color = 0xFF000000,
@@ -798,9 +1145,15 @@ fun PdfEditorScreen(
 private fun EditorToolButton(
     icon: ImageVector,
     label: String,
-    isActive: Boolean,
+    isActive: Boolean = false,
+    isEnabled: Boolean = true,
     onClick: () -> Unit
 ) {
+    val tint = when {
+        isActive -> BrandPrimary
+        isEnabled -> TextPrimary
+        else -> TextSecondary.copy(alpha = 0.35f)
+    }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -811,13 +1164,13 @@ private fun EditorToolButton(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = if (isActive) BrandPrimary else TextSecondary,
+            tint = tint,
             modifier = Modifier.size(20.dp)
         )
         Text(
             text = label,
             fontSize = 9.sp,
-            color = if (isActive) BrandPrimary else TextSecondary,
+            color = tint,
             fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
         )
     }

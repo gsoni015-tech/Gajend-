@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,18 +16,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,8 +45,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,10 +56,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import com.example.ads.AdMobManager
 import com.example.data.local.PdfEntity
 import com.example.reader.ExcelDocument
 import com.example.reader.OfficeDocumentHelper
@@ -72,16 +83,26 @@ fun ExcelViewerScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    BackHandler { onBack() }
+    val context = LocalContext.current
+    val activity = context as? Activity
+    val handleBack: () -> Unit = {
+        if (activity != null) {
+            AdMobManager.showBackPressInterstitial(activity) { onBack() }
+        } else {
+            onBack()
+        }
+    }
+
+    BackHandler { handleBack() }
 
     var excelDoc by remember { mutableStateOf<ExcelDocument?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var selectedSheetIndex by remember { mutableIntStateOf(0) }
-    var isListView by remember { mutableStateOf(false) } // Toggle for vertical card list
+    var isListView by remember { mutableStateOf(false) }
 
-    LaunchedEffect(entity.path) {
+    LaunchedEffect(entity.path, entity.uriString) {
         isLoading = true
-        excelDoc = OfficeDocumentHelper.parseExcelDocument(File(entity.path))
+        excelDoc = OfficeDocumentHelper.parseExcelDocument(File(entity.path), context, entity.uriString)
         isLoading = false
     }
 
@@ -93,41 +114,63 @@ fun ExcelViewerScreen(
                 color = WhiteMixSurface,
                 shadowElevation = 1.dp
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp) // Compact 48dp height
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .statusBarsPadding()
+                        .displayCutoutPadding()
                 ) {
-                    IconButton(
-                        onClick = onBack,
-                        modifier = Modifier.size(36.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = entity.title,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    // View Mode Toggle (Table Grid vs Vertical Card List)
-                    IconButton(
-                        onClick = { isListView = !isListView },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isListView) Icons.Default.TableChart else Icons.Default.ViewAgenda,
-                            contentDescription = if (isListView) "Switch to Table Grid" else "Switch to Vertical List",
-                            tint = BrandPrimary,
-                            modifier = Modifier.size(20.dp)
+                        IconButton(
+                            onClick = handleBack,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = entity.title,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
+
+                        // Open with external app (Excel, Sheets)
+                        IconButton(
+                            onClick = {
+                                openExcelInExternalApp(context, entity)
+                            },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.OpenInNew,
+                                contentDescription = "Open with Excel or Sheets",
+                                tint = BrandPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // View Mode Toggle (Table Grid vs Vertical Card List)
+                        IconButton(
+                            onClick = { isListView = !isListView },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isListView) Icons.Default.TableChart else Icons.Default.ViewAgenda,
+                                contentDescription = if (isListView) "Switch to Table Grid" else "Switch to Vertical List",
+                                tint = BrandPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -137,6 +180,7 @@ fun ExcelViewerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .navigationBarsPadding()
         ) {
             if (isLoading) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -167,7 +211,7 @@ fun ExcelViewerScreen(
 
                         currentSheetData?.let { sheet ->
                             if (isListView) {
-                                // Vertical Card List View for mobile ease of reading
+                                // Vertical Card List View for mobile reading
                                 LazyColumn(
                                     modifier = Modifier.fillMaxSize(),
                                     contentPadding = PaddingValues(12.dp),
@@ -281,5 +325,38 @@ fun ExcelViewerScreen(
                 }
             }
         }
+    }
+}
+
+private fun openExcelInExternalApp(context: Context, entity: PdfEntity) {
+    try {
+        val file = File(entity.path)
+        val uri: Uri? = if (file.exists() && file.length() > 0) {
+            FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        } else if (!entity.uriString.isNullOrBlank()) {
+            Uri.parse(entity.uriString)
+        } else {
+            null
+        }
+
+        if (uri == null) {
+            Toast.makeText(context, "File path not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val mime = when {
+            entity.title.endsWith(".csv", ignoreCase = true) -> "text/csv"
+            entity.title.endsWith(".xls", ignoreCase = true) -> "application/vnd.ms-excel"
+            else -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(Intent.createChooser(intent, "Open with Excel or Sheets"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Unable to open external app: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }
