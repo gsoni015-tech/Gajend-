@@ -13,6 +13,11 @@
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
+    <!-- Remove unused Privacy Sandbox measurement permission to prevent onNullBinding MEASUREMENT_SERVICE error -->
+    <uses-permission
+        android:name="android.permission.ACCESS_ADSERVICES_ATTRIBUTION"
+        tools:node="remove" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
@@ -42,10 +47,6 @@
         <meta-data
             android:name="com.google.android.gms.ads.flag.OPTIMIZE_AD_LOADING"
             android:value="true" />
-
-        <property
-            android:name="android.adservices.AD_SERVICES_CONFIG"
-            tools:node="remove" />
 
         <activity
             android:name=".MainActivity"

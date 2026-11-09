@@ -39,10 +39,11 @@ import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
 object AdMobManager {
     private const val TAG = "AdMobManager"
 
-    // Official Google AdMob test ad units - 100% guaranteed fill on all devices and emulators
-    const val TEST_BANNER_ID = "ca-app-pub-3940256099942544/6300978111"
-    const val TEST_INTERSTITIAL_ID = "ca-app-pub-3940256099942544/1033173712"
-    const val TEST_REWARDED_ID = "ca-app-pub-3940256099942544/5224354917"
+    // Real AdMob Production Ad Unit IDs
+    const val REAL_BANNER_ID = "ca-app-pub-9247143643125748/5366325906"
+    const val REAL_INTERSTITIAL_ID = "ca-app-pub-9247143643125748/3927267520"
+    const val REAL_REWARDED_ID = "ca-app-pub-9247143643125748/5688861742"
+    const val REAL_NATIVE_ID = "ca-app-pub-9247143643125748/6648093340"
 
     var isInitialized = false
         private set
@@ -58,15 +59,9 @@ object AdMobManager {
     fun initialize(context: Context) {
         if (isInitialized) return
         try {
-            // Configure test devices for emulator and development
-            val requestConfiguration = RequestConfiguration.Builder()
-                .setTestDeviceIds(listOf(AdRequest.DEVICE_ID_EMULATOR))
-                .build()
-            MobileAds.setRequestConfiguration(requestConfiguration)
-
             MobileAds.initialize(context) { status ->
                 isInitialized = true
-                Log.d(TAG, "AdMob initialized successfully: $status")
+                Log.d(TAG, "AdMob production initialized: $status")
                 loadInterstitial(context.applicationContext)
                 loadRewarded(context.applicationContext)
             }
@@ -75,19 +70,15 @@ object AdMobManager {
         }
     }
 
-    fun loadInterstitial(context: Context, useFallback: Boolean = false) {
+    fun loadInterstitial(context: Context) {
         if (interstitialAd != null || isInterstitialLoading) return
         isInterstitialLoading = true
 
         try {
             val configuredId = try { context.getString(R.string.admob_interstitial) } catch (e: Exception) { "" }
-            val adUnitId = if (useFallback || configuredId.isBlank()) {
-                TEST_INTERSTITIAL_ID
-            } else {
-                configuredId
-            }
+            val adUnitId = if (configuredId.isNotBlank()) configuredId else REAL_INTERSTITIAL_ID
 
-            Log.d(TAG, "Loading interstitial ad with ID: $adUnitId (fallback=$useFallback)")
+            Log.d(TAG, "Loading real interstitial ad with ID: $adUnitId")
             val adRequest = AdRequest.Builder().build()
 
             InterstitialAd.load(
@@ -98,29 +89,20 @@ object AdMobManager {
                     override fun onAdLoaded(ad: InterstitialAd) {
                         interstitialAd = ad
                         isInterstitialLoading = false
-                        Log.d(TAG, "Interstitial loaded successfully ($adUnitId)")
+                        Log.d(TAG, "Real Interstitial loaded successfully ($adUnitId)")
                     }
 
                     override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                        Log.w(TAG, "Interstitial failed ($adUnitId): ${loadAdError.message} (code ${loadAdError.code})")
+                        Log.w(TAG, "Real Interstitial failed ($adUnitId): ${loadAdError.message} (code ${loadAdError.code})")
                         interstitialAd = null
                         isInterstitialLoading = false
-
-                        // If primary configured unit failed, immediately fallback to official test ad unit
-                        if (!useFallback && adUnitId != TEST_INTERSTITIAL_ID) {
-                            Log.d(TAG, "Retrying interstitial with official test ad unit...")
-                            loadInterstitial(context, useFallback = true)
-                        }
                     }
                 }
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Exception loading interstitial", e)
+            Log.e(TAG, "Exception loading real interstitial", e)
             interstitialAd = null
             isInterstitialLoading = false
-            if (!useFallback) {
-                loadInterstitial(context, useFallback = true)
-            }
         }
     }
 
@@ -172,19 +154,15 @@ object AdMobManager {
         showBackPressInterstitial(activity, onDismiss)
     }
 
-    fun loadRewarded(context: Context, useFallback: Boolean = false) {
+    fun loadRewarded(context: Context) {
         if (rewardedAd != null || isRewardedLoading) return
         isRewardedLoading = true
 
         try {
             val configuredId = try { context.getString(R.string.admob_rewarded) } catch (e: Exception) { "" }
-            val adUnitId = if (useFallback || configuredId.isBlank()) {
-                TEST_REWARDED_ID
-            } else {
-                configuredId
-            }
+            val adUnitId = if (configuredId.isNotBlank()) configuredId else REAL_REWARDED_ID
 
-            Log.d(TAG, "Loading rewarded ad with ID: $adUnitId (fallback=$useFallback)")
+            Log.d(TAG, "Loading real rewarded ad with ID: $adUnitId")
             val adRequest = AdRequest.Builder().build()
 
             RewardedAd.load(
@@ -195,29 +173,20 @@ object AdMobManager {
                     override fun onAdLoaded(ad: RewardedAd) {
                         rewardedAd = ad
                         isRewardedLoading = false
-                        Log.d(TAG, "Rewarded ad loaded successfully ($adUnitId)")
+                        Log.d(TAG, "Real Rewarded ad loaded successfully ($adUnitId)")
                     }
 
                     override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                        Log.w(TAG, "Rewarded ad failed ($adUnitId): ${loadAdError.message} (code ${loadAdError.code})")
+                        Log.w(TAG, "Real Rewarded ad failed ($adUnitId): ${loadAdError.message} (code ${loadAdError.code})")
                         rewardedAd = null
                         isRewardedLoading = false
-
-                        // If primary configured unit failed, immediately fallback to official test ad unit
-                        if (!useFallback && adUnitId != TEST_REWARDED_ID) {
-                            Log.d(TAG, "Retrying rewarded ad with official test ad unit...")
-                            loadRewarded(context, useFallback = true)
-                        }
                     }
                 }
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Exception loading rewarded ad", e)
+            Log.e(TAG, "Exception loading real rewarded ad", e)
             rewardedAd = null
             isRewardedLoading = false
-            if (!useFallback) {
-                loadRewarded(context, useFallback = true)
-            }
         }
     }
 
@@ -270,13 +239,14 @@ object AdMobManager {
 }
 
 /**
- * Adaptive Banner anchored at the bottom of main screens with guaranteed test ad fallback.
+ * Adaptive Banner anchored at the bottom of main screens using real AdMob banner ad unit.
  */
 @Composable
 fun AdaptiveBannerAdView(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val configuredBannerId = remember {
-        try { context.getString(R.string.admob_banner) } catch (e: Exception) { AdMobManager.TEST_BANNER_ID }
+        val id = try { context.getString(R.string.admob_banner) } catch (e: Exception) { "" }
+        if (id.isNotBlank()) id else AdMobManager.REAL_BANNER_ID
     }
     var adViewRef by remember { mutableStateOf<AdView?>(null) }
 
@@ -300,7 +270,7 @@ fun AdaptiveBannerAdView(modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxWidth(),
             factory = { ctx ->
                 AdView(ctx).apply {
-                    adUnitId = if (configuredBannerId.isNotBlank()) configuredBannerId else AdMobManager.TEST_BANNER_ID
+                    adUnitId = configuredBannerId
                     setAdSize(AdSize.BANNER)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -308,27 +278,17 @@ fun AdaptiveBannerAdView(modifier: Modifier = Modifier) {
                     )
                     adListener = object : AdListener() {
                         override fun onAdLoaded() {
-                            Log.d("AdMobManager", "Banner ad loaded successfully on screen")
+                            Log.d("AdMobManager", "Real Banner ad loaded successfully on screen: $configuredBannerId")
                         }
 
                         override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                            Log.w("AdMobManager", "Banner ad failed to load ($adUnitId): ${loadAdError.message}")
-                            // Fallback to test banner ID so user ALWAYS sees working ad
-                            if (adUnitId != AdMobManager.TEST_BANNER_ID) {
-                                Log.d("AdMobManager", "Reloading banner with official test ad unit...")
-                                adUnitId = AdMobManager.TEST_BANNER_ID
-                                try {
-                                    loadAd(AdRequest.Builder().build())
-                                } catch (e: Exception) {
-                                    Log.e("AdMobManager", "Banner fallback load error", e)
-                                }
-                            }
+                            Log.w("AdMobManager", "Real Banner ad failed to load ($adUnitId): ${loadAdError.message} (code: ${loadAdError.code})")
                         }
                     }
                     try {
                         loadAd(AdRequest.Builder().build())
                     } catch (e: Exception) {
-                        Log.e("AdMobManager", "Banner initial load error", e)
+                        Log.e("AdMobManager", "Real Banner initial load error", e)
                     }
                     adViewRef = this
                 }
