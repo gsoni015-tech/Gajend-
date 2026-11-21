@@ -1,0 +1,116 @@
+{
+  "entities": {
+    "CloudDocument": {
+      "title": "CloudDocument",
+      "description": "Metadata and sync tracking record for a user's PDF or office document synced to Google Cloud.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID matching request.auth.uid."
+        },
+        "title": {
+          "type": "string",
+          "description": "Document file name including extension."
+        },
+        "documentType": {
+          "type": "string",
+          "enum": ["PDF", "WORD", "EXCEL", "OTHER"],
+          "description": "Classified document format."
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "description": "Document byte size on device and cloud."
+        },
+        "contentHash": {
+          "type": "string",
+          "description": "Deterministic SHA-256 content/signature identifier."
+        },
+        "storagePath": {
+          "type": "string",
+          "description": "Firebase Storage object path under users/{userId}/pdfs/."
+        },
+        "syncState": {
+          "type": "string",
+          "enum": ["SYNCED", "METADATA_ONLY", "ERROR"],
+          "description": "Cloud upload status of the document."
+        },
+        "localPath": {
+          "type": "string",
+          "description": "Optional originating local device path."
+        },
+        "folderName": {
+          "type": "string",
+          "description": "Optional originating folder label on device."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "title",
+        "documentType",
+        "sizeBytes",
+        "contentHash",
+        "storagePath",
+        "syncState",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AppReleaseConfig": {
+      "title": "AppReleaseConfig",
+      "description": "Public read-only release manifest used by non-Play-Store APK builds to check for newer updates.",
+      "type": "object",
+      "properties": {
+        "latestVersionCode": {
+          "type": "integer",
+          "description": "Monotonically increasing Android versionCode of the latest APK release."
+        },
+        "latestVersionName": {
+          "type": "string",
+          "description": "Human-readable version label such as 1.1 or 2.0."
+        },
+        "apkUrl": {
+          "type": "string",
+          "description": "HTTPS direct download URL for the signed APK package."
+        },
+        "releaseNotes": {
+          "type": "string",
+          "description": "Short summary of improvements included in this release."
+        },
+        "forceUpdate": {
+          "type": "boolean",
+          "description": "Whether the update dialog should require installing before continuing."
+        }
+      },
+      "required": [
+        "latestVersionCode",
+        "latestVersionName",
+        "apkUrl"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/cloud_documents/{docId}": {
+      "schema": {
+        "$ref": "#/entities/CloudDocument"
+      },
+      "description": "Per-user cloud-synced PDF and document records."
+    },
+    "/app_config/{configId}": {
+      "schema": {
+        "$ref": "#/entities/AppReleaseConfig"
+      },
+      "description": "Read-only app configuration documents such as latest_release for direct APK update checks."
+    }
+  }
+}

@@ -3,6 +3,8 @@ package com.example.reader
 import android.content.Context
 import android.net.Uri
 import android.util.Xml
+import com.example.ui.theme.AppFonts
+import com.example.util.KrutiDevConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
@@ -14,29 +16,55 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
-import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
+
+data class WordRun(
+    val text: String,
+    val isBold: Boolean = false,
+    val isItalic: Boolean = false,
+    val fontName: String? = null,
+    val detectedFont: AppFonts.SupportedFont = AppFonts.SupportedFont.SYSTEM_DEFAULT
+)
 
 data class WordParagraph(
     val text: String,
     val isHeading: Boolean = false,
-    val isBold: Boolean = false
+    val isBold: Boolean = false,
+    val fontName: String? = null,
+    val detectedFont: AppFonts.SupportedFont = AppFonts.SupportedFont.SYSTEM_DEFAULT,
+    val runs: List<WordRun> = emptyList()
 )
 
 data class WordDocument(
     val title: String,
-    val paragraphs: List<WordParagraph>
+    val paragraphs: List<WordParagraph>,
+    val primaryDetectedFont: AppFonts.SupportedFont = AppFonts.SupportedFont.SYSTEM_DEFAULT,
+    val detectedFontNames: List<String> = emptyList()
 )
 
 data class ExcelTableData(
     val headers: List<String>,
-    val rows: List<List<String>>
+    val rows: List<List<String>>,
+    val headerFonts: List<AppFonts.SupportedFont> = emptyList(),
+    val rowFonts: List<List<AppFonts.SupportedFont>> = emptyList()
 )
 
 data class ExcelDocument(
     val title: String,
-    val sheets: Map<String, ExcelTableData>
+    val sheets: Map<String, ExcelTableData>,
+    val primaryDetectedFont: AppFonts.SupportedFont = AppFonts.SupportedFont.ENGLISH_OPEN_SANS,
+    val detectedFontNames: List<String> = emptyList()
+)
+
+private data class DocxStyleInfo(
+    val defaultFont: String? = null,
+    val styleFonts: Map<String, String> = emptyMap()
+)
+
+private data class XlsxStyleInfo(
+    val fontNamesById: List<String?> = emptyList(),
+    val xfToFontName: List<String?> = emptyList()
 )
 
 object OfficeDocumentHelper {
@@ -82,6 +110,26 @@ object OfficeDocumentHelper {
         }
     }
 
+    private fun getXmlAttr(parser: XmlPullParser, localName: String): String? {
+        for (i in 0 until parser.attributeCount) {
+            val attrName = parser.getAttributeName(i)
+            if (attrName == localName || attrName.endsWith(":$localName")) {
+                return parser.getAttributeValue(i)
+            }
+        }
+        return null
+    }
+
+    private fun extractFontNameFromRFonts(parser: XmlPullParser): String? {
+        val ascii = getXmlAttr(parser, "ascii")
+        val hAnsi = getXmlAttr(parser, "hAnsi")
+        val cs = getXmlAttr(parser, "cs")
+        val eastAsia = getXmlAttr(parser, "eastAsia")
+        return listOfNotNull(ascii, hAnsi, cs, eastAsia)
+            .firstOrNull { it.isNotBlank() }
+            ?.trim()
+    }
+
     suspend fun parseWordDocument(
         file: File,
         context: Context? = null,
@@ -93,31 +141,46 @@ object OfficeDocumentHelper {
                 (uriString != null && uriString.contains("docx", ignoreCase = true))
 
         val resolvedFile = getFileOrCopyToTemp(context, file, uriString, "word_temp")
+        var styleInfo = DocxStyleInfo()
 
         if (isDocx && resolvedFile != null) {
             try {
                 ZipFile(resolvedFile).use { zip ->
+                    val stylesEntry = zip.getEntry("word/styles.xml")
+                    if (stylesEntry != null) {
+                        zip.getInputStream(stylesEntry).use { input ->
+                            styleInfo = parseDocxStylesXml(input)
+                        }
+                    }
                     val docEntry = zip.getEntry("word/document.xml")
                     if (docEntry != null) {
                         zip.getInputStream(docEntry).use { input ->
-                            paragraphs.addAll(parseDocxDocumentXml(input))
+                            paragraphs.addAll(parseDocxDocumentXml(input, styleInfo))
                         }
                     }
                 }
             } catch (e: Exception) {
                 // If ZipFile fails (e.g. streaming or format variant), try ZipInputStream fallback
                 try {
+                    var docXmlBytes: ByteArray? = null
+                    var stylesXmlBytes: ByteArray? = null
                     getInputStream(context, file, uriString)?.use { stream ->
                         ZipInputStream(stream).use { zis ->
                             var entry = zis.nextEntry
                             while (entry != null) {
-                                if (entry.name == "word/document.xml") {
-                                    paragraphs.addAll(parseDocxDocumentXml(zis))
-                                    break
+                                when (entry.name) {
+                                    "word/styles.xml" -> stylesXmlBytes = zis.readBytes()
+                                    "word/document.xml" -> docXmlBytes = zis.readBytes()
                                 }
                                 entry = zis.nextEntry
                             }
                         }
+                    }
+                    if (stylesXmlBytes != null) {
+                        styleInfo = parseDocxStylesXml(ByteArrayInputStream(stylesXmlBytes))
+                    }
+                    if (docXmlBytes != null) {
+                        paragraphs.addAll(parseDocxDocumentXml(ByteArrayInputStream(docXmlBytes), styleInfo))
                     }
                 } catch (ex: Exception) {
                     // Fall through to plain text extraction
@@ -126,11 +189,14 @@ object OfficeDocumentHelper {
         }
 
         // If paragraphs still empty, or if it is a binary .doc or plain text file
+        var binaryDetectedFonts = emptyList<String>()
         if (paragraphs.isEmpty()) {
             try {
                 val bytes = resolvedFile?.readBytes() ?: getInputStream(context, file, uriString)?.readBytes()
                 if (bytes != null && bytes.isNotEmpty()) {
-                    paragraphs.addAll(extractCleanTextFromDocBytes(bytes))
+                    val extracted = extractCleanTextFromDocBytes(bytes)
+                    paragraphs.addAll(extracted.first)
+                    binaryDetectedFonts = extracted.second
                 }
             } catch (e: Exception) {
                 paragraphs.add(WordParagraph("Error reading document: ${e.message}"))
@@ -143,23 +209,135 @@ object OfficeDocumentHelper {
             )
         }
 
-        WordDocument(file.nameWithoutExtension.ifBlank { "Word Document" }, paragraphs)
+        // Compute primary detected font across all paragraphs & runs
+        val fontFrequency = mutableMapOf<AppFonts.SupportedFont, Int>()
+        val rawFontNames = linkedSetOf<String>()
+        styleInfo.defaultFont?.let { rawFontNames.add(it) }
+        rawFontNames.addAll(binaryDetectedFonts)
+
+        for (para in paragraphs) {
+            para.fontName?.let { rawFontNames.add(it) }
+            if (para.runs.isNotEmpty()) {
+                for (run in para.runs) {
+                    run.fontName?.let { rawFontNames.add(it) }
+                    val weight = run.text.length.coerceAtLeast(1)
+                    fontFrequency[run.detectedFont] = (fontFrequency[run.detectedFont] ?: 0) + weight
+                }
+            } else {
+                val weight = para.text.length.coerceAtLeast(1)
+                fontFrequency[para.detectedFont] = (fontFrequency[para.detectedFont] ?: 0) + weight
+            }
+        }
+
+        // If Kruti Dev was detected anywhere strongly or in font table on non-Unicode text, prefer it cleanly
+        val combinedSample = paragraphs.take(12).joinToString(" ") { it.text }
+        val hasUnicodeDevanagari = AppFonts.containsDevanagariUnicode(combinedSample)
+        val hasKrutiMetadata = rawFontNames.any { it.contains("kruti", ignoreCase = true) || it.contains("devlys", ignoreCase = true) }
+
+        val primaryFont = when {
+            !hasUnicodeDevanagari && hasKrutiMetadata -> AppFonts.SupportedFont.KRUTI_DEV
+            !hasUnicodeDevanagari && KrutiDevConverter.isLikelyKrutiDev(combinedSample) -> AppFonts.SupportedFont.KRUTI_DEV
+            else -> fontFrequency.maxByOrNull { it.value }?.key
+                ?: AppFonts.detectFontForText(combinedSample, rawFontNames.firstOrNull())
+        }
+
+        // Normalize paragraphs that relied on document default font if primaryFont is Kruti Dev
+        val finalParagraphs = if (primaryFont == AppFonts.SupportedFont.KRUTI_DEV) {
+            paragraphs.map { para ->
+                if (!AppFonts.containsDevanagariUnicode(para.text) &&
+                    para.fontName == null &&
+                    para.detectedFont == AppFonts.SupportedFont.ENGLISH_OPEN_SANS
+                ) {
+                    val updatedRuns = para.runs.map { run ->
+                        if (run.fontName == null && !AppFonts.containsDevanagariUnicode(run.text)) {
+                            run.copy(detectedFont = AppFonts.SupportedFont.KRUTI_DEV)
+                        } else run
+                    }
+                    para.copy(detectedFont = AppFonts.SupportedFont.KRUTI_DEV, runs = updatedRuns)
+                } else para
+            }
+        } else {
+            paragraphs
+        }
+
+        WordDocument(
+            title = file.nameWithoutExtension.ifBlank { "Word Document" },
+            paragraphs = finalParagraphs,
+            primaryDetectedFont = primaryFont,
+            detectedFontNames = rawFontNames.toList()
+        )
+    }
+
+    private fun parseDocxStylesXml(inputStream: InputStream): DocxStyleInfo {
+        var defaultFont: String? = null
+        val styleFonts = mutableMapOf<String, String>()
+        try {
+            val parser = Xml.newPullParser()
+            parser.setInput(inputStream, "UTF-8")
+
+            var eventType = parser.eventType
+            var insideDocDefaults = false
+            var currentStyleId: String? = null
+
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        when (parser.name) {
+                            "docDefaults" -> insideDocDefaults = true
+                            "style" -> currentStyleId = getXmlAttr(parser, "styleId")
+                            "rFonts" -> {
+                                val font = extractFontNameFromRFonts(parser)
+                                if (!font.isNullOrBlank()) {
+                                    if (insideDocDefaults && defaultFont == null) {
+                                        defaultFont = font
+                                    } else if (currentStyleId != null && !styleFonts.containsKey(currentStyleId)) {
+                                        styleFonts[currentStyleId] = font
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    XmlPullParser.END_TAG -> {
+                        when (parser.name) {
+                            "docDefaults" -> insideDocDefaults = false
+                            "style" -> currentStyleId = null
+                        }
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (e: Exception) {
+            // Styles optional; ignore malformed style XML
+        }
+        return DocxStyleInfo(defaultFont, styleFonts)
     }
 
     /**
      * Parses word/document.xml with XmlPullParser preserving UTF-8 Devanagari, Hindi,
-     * English, and all international Unicode characters and styles.
+     * English, run-level font metadata (w:rFonts), bold/italic styles, and Kruti Dev 010 detection.
      */
-    private fun parseDocxDocumentXml(inputStream: InputStream): List<WordParagraph> {
+    private fun parseDocxDocumentXml(
+        inputStream: InputStream,
+        styleInfo: DocxStyleInfo
+    ): List<WordParagraph> {
         val result = mutableListOf<WordParagraph>()
         val parser = Xml.newPullParser()
         parser.setInput(inputStream, "UTF-8")
 
         var eventType = parser.eventType
         var insideParagraph = false
-        var currentText = StringBuilder()
+        var insideParagraphProps = false
+        var insideRun = false
+        var currentStyleId: String? = null
         var isHeading = false
-        var isBold = false
+        var paraDefaultBold = false
+        var paraDefaultFont: String? = null
+
+        var runBold = false
+        var runItalic = false
+        var runFont: String? = null
+        var currentRunText = StringBuilder()
+        val currentParagraphRuns = mutableListOf<WordRun>()
 
         while (eventType != XmlPullParser.END_DOCUMENT) {
             when (eventType) {
@@ -167,13 +345,23 @@ object OfficeDocumentHelper {
                     when (parser.name) {
                         "p" -> {
                             insideParagraph = true
-                            currentText = StringBuilder()
+                            insideParagraphProps = false
+                            insideRun = false
+                            currentStyleId = null
                             isHeading = false
-                            isBold = false
+                            paraDefaultBold = false
+                            paraDefaultFont = null
+                            currentParagraphRuns.clear()
+                        }
+                        "pPr" -> {
+                            if (insideParagraph && !insideRun) {
+                                insideParagraphProps = true
+                            }
                         }
                         "pStyle" -> {
                             if (insideParagraph) {
-                                val styleVal = parser.getAttributeValue(null, "val") ?: ""
+                                val styleVal = getXmlAttr(parser, "val") ?: ""
+                                currentStyleId = styleVal
                                 if (styleVal.contains("Heading", ignoreCase = true) ||
                                     styleVal.contains("Title", ignoreCase = true)
                                 ) {
@@ -181,39 +369,140 @@ object OfficeDocumentHelper {
                                 }
                             }
                         }
-                        "b" -> {
+                        "r" -> {
                             if (insideParagraph) {
-                                val bVal = parser.getAttributeValue(null, "val")
-                                if (bVal == null || bVal == "1" || bVal.equals("true", ignoreCase = true)) {
-                                    isBold = true
+                                insideRun = true
+                                runBold = paraDefaultBold
+                                runItalic = false
+                                runFont = null
+                                currentRunText = StringBuilder()
+                            }
+                        }
+                        "rFonts" -> {
+                            val font = extractFontNameFromRFonts(parser)
+                            if (!font.isNullOrBlank()) {
+                                if (insideRun) {
+                                    runFont = font
+                                } else if (insideParagraphProps) {
+                                    paraDefaultFont = font
                                 }
+                            }
+                        }
+                        "b" -> {
+                            val bVal = getXmlAttr(parser, "val")
+                            val enabled = bVal == null || bVal == "1" || bVal.equals("true", ignoreCase = true)
+                            if (insideRun) {
+                                runBold = enabled
+                            } else if (insideParagraphProps) {
+                                paraDefaultBold = enabled
+                            }
+                        }
+                        "i" -> {
+                            val iVal = getXmlAttr(parser, "val")
+                            val enabled = iVal == null || iVal == "1" || iVal.equals("true", ignoreCase = true)
+                            if (insideRun) {
+                                runItalic = enabled
                             }
                         }
                         "t" -> {
                             if (insideParagraph) {
                                 val text = parser.nextText()
-                                currentText.append(text)
+                                if (insideRun) {
+                                    currentRunText.append(text)
+                                } else {
+                                    currentParagraphRuns.add(
+                                        WordRun(
+                                            text = text,
+                                            isBold = paraDefaultBold,
+                                            fontName = paraDefaultFont,
+                                            detectedFont = AppFonts.detectFontForText(
+                                                text = text,
+                                                declaredFontName = paraDefaultFont ?: currentStyleId?.let { styleInfo.styleFonts[it] } ?: styleInfo.defaultFont,
+                                                isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(text)
+                                            )
+                                        )
+                                    )
+                                }
                             }
                         }
                         "tab" -> {
-                            if (insideParagraph) {
-                                currentText.append("    ")
-                            }
+                            if (insideRun) currentRunText.append("    ")
                         }
                         "br" -> {
-                            if (insideParagraph) {
-                                currentText.append("\n")
-                            }
+                            if (insideRun) currentRunText.append("\n")
                         }
                     }
                 }
                 XmlPullParser.END_TAG -> {
-                    if (parser.name == "p") {
-                        val text = currentText.toString().trim()
-                        if (text.isNotEmpty()) {
-                            result.add(WordParagraph(text, isHeading, isBold))
+                    when (parser.name) {
+                        "pPr" -> insideParagraphProps = false
+                        "r" -> {
+                            if (insideRun) {
+                                val rText = currentRunText.toString()
+                                if (rText.isNotEmpty()) {
+                                    val effectiveFontName = runFont
+                                        ?: paraDefaultFont
+                                        ?: currentStyleId?.let { styleInfo.styleFonts[it] }
+                                        ?: styleInfo.defaultFont
+                                    val detected = AppFonts.detectFontForText(
+                                        text = rText,
+                                        declaredFontName = effectiveFontName,
+                                        isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(rText)
+                                    )
+                                    currentParagraphRuns.add(
+                                        WordRun(
+                                            text = rText,
+                                            isBold = runBold,
+                                            isItalic = runItalic,
+                                            fontName = effectiveFontName,
+                                            detectedFont = detected
+                                        )
+                                    )
+                                }
+                                insideRun = false
+                            }
                         }
-                        insideParagraph = false
+                        "p" -> {
+                            val fullText = currentParagraphRuns.joinToString("") { it.text }.trim()
+                            if (fullText.isNotEmpty()) {
+                                val isParaKruti = KrutiDevConverter.isLikelyKrutiDev(fullText)
+                                val paraRawFont = paraDefaultFont
+                                    ?: currentParagraphRuns.firstOrNull { !it.fontName.isNullOrBlank() }?.fontName
+                                    ?: currentStyleId?.let { styleInfo.styleFonts[it] }
+                                    ?: styleInfo.defaultFont
+                                val paraDetectedFont = AppFonts.detectFontForText(
+                                    text = fullText,
+                                    declaredFontName = paraRawFont,
+                                    isKrutiLikely = isParaKruti
+                                )
+                                val normalizedRuns = if (paraDetectedFont == AppFonts.SupportedFont.KRUTI_DEV &&
+                                    !AppFonts.containsDevanagariUnicode(fullText)
+                                ) {
+                                    currentParagraphRuns.map { run ->
+                                        if (run.detectedFont == AppFonts.SupportedFont.ENGLISH_OPEN_SANS &&
+                                            run.fontName == null
+                                        ) {
+                                            run.copy(detectedFont = AppFonts.SupportedFont.KRUTI_DEV)
+                                        } else run
+                                    }
+                                } else {
+                                    currentParagraphRuns.toList()
+                                }
+
+                                val allBold = normalizedRuns.isNotEmpty() && normalizedRuns.all { it.isBold }
+                                result.add(
+                                    WordParagraph(
+                                        text = fullText,
+                                        isHeading = isHeading,
+                                        isBold = allBold || paraDefaultBold,
+                                        fontName = paraRawFont,
+                                        detectedFont = paraDetectedFont,
+                                        runs = normalizedRuns
+                                    )
+                                )
+                            }
+                            insideParagraph = false
+                        }
                     }
                 }
             }
@@ -223,19 +512,70 @@ object OfficeDocumentHelper {
         return result
     }
 
+    private fun decodeWindows1252Byte(b: Int): Char? {
+        return when (b) {
+            in 0x20..0x7E -> b.toChar()
+            0x80 -> '\u20AC'
+            0x82 -> '\u201A'
+            0x83 -> '\u0192'
+            0x84 -> '\u201E'
+            0x85 -> '\u2026'
+            0x86 -> '\u2020'
+            0x87 -> '\u2021'
+            0x88 -> '\u02C6'
+            0x89 -> '\u2030'
+            0x8A -> '\u0160'
+            0x8B -> '\u2039'
+            0x8C -> '\u0152'
+            0x8E -> '\u017D'
+            0x91 -> '\u2018'
+            0x92 -> '\u2019'
+            0x93 -> '\u201C'
+            0x94 -> '\u201D'
+            0x95 -> '\u2022'
+            0x96 -> '\u2013'
+            0x97 -> '\u2014'
+            0x98 -> '\u02DC' // ˜ used in Kruti Dev
+            0x99 -> '\u2122'
+            0x9A -> '\u0161'
+            0x9B -> '\u203A'
+            0x9C -> '\u0153'
+            0x9E -> '\u017E'
+            0x9F -> '\u0178'
+            in 0xA1..0xFF -> b.toChar() // Includes ç, ø, å, æ, è, é, ê, ë, etc.
+            else -> null
+        }
+    }
+
     /**
-     * Extracts clean human-readable UTF-16LE and UTF-8 strings from binary .doc files,
-     * skipping OLE2 file headers and binary metadata tables.
+     * Extracts clean human-readable UTF-16LE and Windows-1252 strings from binary .doc files,
+     * detects embedded font names (e.g. Kruti Dev 010, Mangal, Times New Roman), and skips OLE2 metadata.
      */
-    private fun extractCleanTextFromDocBytes(bytes: ByteArray): List<WordParagraph> {
+    private fun extractCleanTextFromDocBytes(bytes: ByteArray): Pair<List<WordParagraph>, List<String>> {
         val paragraphs = mutableListOf<WordParagraph>()
         val sb = StringBuilder()
+        val foundFontNames = linkedSetOf<String>()
+
+        val knownFontNames = listOf(
+            "Kruti Dev 010", "Kruti Dev 011", "Kruti Dev 020", "Kruti Dev",
+            "DevLys 010", "DevLys", "Chanakya", "Mangal", "Kokila",
+            "Aparajita", "Utsaah", "Nirmala UI", "Times New Roman",
+            "Calibri", "Cambria", "Arial", "Courier New", "Georgia"
+        )
 
         val ignoredKeywords = setOf(
             "WordDocument", "SummaryInformation", "DocumentSummaryInformation",
-            "Root Entry", "CompObj", "Normal.dot", "Times New Roman",
-            "Calibri", "Arial", "Default Paragraph Font", "Table"
-        )
+            "Root Entry", "CompObj", "Normal.dot", "Default Paragraph Font",
+            "Table", "Microsoft Word", "MSWordDoc", "1Table", "0Table"
+        ) + knownFontNames
+
+        fun checkFontMetadata(runText: String) {
+            for (font in knownFontNames) {
+                if (runText.contains(font, ignoreCase = true)) {
+                    foundFontNames.add(font)
+                }
+            }
+        }
 
         // Try scanning UTF-16LE characters (2 bytes per char) - standard in Word 97-2003
         var i = 0
@@ -245,14 +585,12 @@ object OfficeDocumentHelper {
             val b1 = bytes[i + 1].toInt() and 0xFF
             val charCode = (b1 shl 8) or b0
 
-            // Check if valid readable character:
-            // - Devanagari / Indic: 0x0900..0x0D7F
-            // - Standard Latin & digits: 0x0020..0x007E
-            // - Newlines & whitespace: 0x000A, 0x000D, 0x0009
-            // - General punctuation / quotes / symbols: 0x2000..0x206F
             val isReadable = (charCode in 0x0020..0x007E) ||
+                    (charCode in 0x00A1..0x00FF) ||
+                    (charCode in 0x02C0..0x02DF) || // Includes ˜ (0x02DC)
                     (charCode in 0x0900..0x097F) ||
                     (charCode in 0x2000..0x206F) ||
+                    charCode == 0x2122 ||
                     charCode == 0x000A || charCode == 0x000D || charCode == 0x0009
 
             if (isReadable) {
@@ -265,7 +603,8 @@ object OfficeDocumentHelper {
             } else {
                 if (currentRun.length >= 4) {
                     val s = currentRun.toString().trim()
-                    if (s.isNotEmpty() && !ignoredKeywords.any { s.contains(it, ignoreCase = true) }) {
+                    checkFontMetadata(s)
+                    if (s.isNotEmpty() && !ignoredKeywords.any { s.equals(it, ignoreCase = true) || (s.length < 40 && s.contains(it, ignoreCase = true)) }) {
                         sb.append(s).append("\n\n")
                     }
                 }
@@ -275,47 +614,74 @@ object OfficeDocumentHelper {
         }
         if (currentRun.length >= 4) {
             val s = currentRun.toString().trim()
-            if (s.isNotEmpty() && !ignoredKeywords.any { s.contains(it, ignoreCase = true) }) {
+            checkFontMetadata(s)
+            if (s.isNotEmpty() && !ignoredKeywords.any { s.equals(it, ignoreCase = true) || (s.length < 40 && s.contains(it, ignoreCase = true)) }) {
                 sb.append(s).append("\n\n")
             }
         }
 
-        // If UTF-16LE didn't find much text, also try 8-bit text run extraction
+        // If UTF-16LE didn't find much text, scan 8-bit Windows-1252 text runs (important for legacy ANSI / Kruti Dev .doc!)
         if (sb.length < 30) {
             var j = 0
-            var asciiRun = StringBuilder()
+            var ansiRun = StringBuilder()
             while (j < bytes.size) {
                 val b = bytes[j].toInt() and 0xFF
-                if ((b in 0x20..0x7E) || b == 0x0A || b == 0x0D || b == 0x09) {
-                    if (b == 0x0A || b == 0x0D) {
-                        asciiRun.append("\n")
-                    } else {
-                        asciiRun.append(b.toChar())
-                    }
+                if (b == 0x0A || b == 0x0D || b == 0x09) {
+                    ansiRun.append(if (b == 0x09) "    " else "\n")
                 } else {
-                    if (asciiRun.length >= 5) {
-                        val s = asciiRun.toString().trim()
-                        if (s.isNotEmpty() && !ignoredKeywords.any { s.contains(it, ignoreCase = true) }) {
-                            sb.append(s).append("\n\n")
+                    val ch = decodeWindows1252Byte(b)
+                    if (ch != null) {
+                        ansiRun.append(ch)
+                    } else {
+                        if (ansiRun.length >= 5) {
+                            val s = ansiRun.toString().trim()
+                            checkFontMetadata(s)
+                            if (s.isNotEmpty() && !ignoredKeywords.any { s.equals(it, ignoreCase = true) || (s.length < 40 && s.contains(it, ignoreCase = true)) }) {
+                                sb.append(s).append("\n\n")
+                            }
                         }
+                        ansiRun = StringBuilder()
                     }
-                    asciiRun = StringBuilder()
                 }
                 j++
             }
+            if (ansiRun.length >= 5) {
+                val s = ansiRun.toString().trim()
+                checkFontMetadata(s)
+                if (s.isNotEmpty() && !ignoredKeywords.any { s.equals(it, ignoreCase = true) || (s.length < 40 && s.contains(it, ignoreCase = true)) }) {
+                    sb.append(s).append("\n\n")
+                }
+            }
         }
+
+        val primaryBinaryFontName = foundFontNames.firstOrNull {
+            it.contains("Kruti", ignoreCase = true) || it.contains("DevLys", ignoreCase = true)
+        } ?: foundFontNames.firstOrNull()
 
         // Split accumulated text into paragraphs
         val lines = sb.toString().split(Regex("[\r\n]{2,}"))
         for (line in lines) {
             val clean = line.trim()
-            if (clean.length >= 2 && !ignoredKeywords.contains(clean)) {
+            if (clean.length >= 2 && !ignoredKeywords.any { clean.equals(it, ignoreCase = true) }) {
                 val isHeading = clean.length < 60 && !clean.endsWith(".")
-                paragraphs.add(WordParagraph(clean, isHeading = isHeading, isBold = isHeading))
+                val detected = AppFonts.detectFontForText(
+                    text = clean,
+                    declaredFontName = primaryBinaryFontName,
+                    isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(clean)
+                )
+                paragraphs.add(
+                    WordParagraph(
+                        text = clean,
+                        isHeading = isHeading,
+                        isBold = isHeading,
+                        fontName = primaryBinaryFontName,
+                        detectedFont = detected
+                    )
+                )
             }
         }
 
-        return paragraphs
+        return Pair(paragraphs, foundFontNames.toList())
     }
 
     suspend fun parseExcelDocument(
@@ -323,12 +689,13 @@ object OfficeDocumentHelper {
         context: Context? = null,
         uriString: String? = null
     ): ExcelDocument = withContext(Dispatchers.IO) {
-        val sheets = mutableMapOf<String, ExcelTableData>()
+        val sheets = linkedMapOf<String, ExcelTableData>()
         val fileName = file.name.ifBlank { uriString?.substringAfterLast('/') ?: "Spreadsheet" }
         val isCsv = fileName.endsWith(".csv", ignoreCase = true) ||
                 (uriString != null && uriString.contains("csv", ignoreCase = true))
 
         val resolvedFile = getFileOrCopyToTemp(context, file, uriString, "excel_temp")
+        val rawFontNames = linkedSetOf<String>()
 
         if (isCsv) {
             try {
@@ -338,11 +705,27 @@ object OfficeDocumentHelper {
                         val lines = linesSeq.filter { it.isNotBlank() }.toList()
                         if (lines.isNotEmpty()) {
                             val parsedRows = lines.map { parseCsvLine(it) }
-                            val headers = parsedRows.first()
+                            val headers = parsedRows.first().ifEmpty { listOf("Col A") }
                             val dataRows = parsedRows.drop(1)
+                            val headerFonts = headers.map { cell ->
+                                AppFonts.detectFontForText(
+                                    text = cell,
+                                    isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(cell)
+                                )
+                            }
+                            val rowFonts = dataRows.map { row ->
+                                row.map { cell ->
+                                    AppFonts.detectFontForText(
+                                        text = cell,
+                                        isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(cell)
+                                    )
+                                }
+                            }
                             sheets["Sheet 1"] = ExcelTableData(
-                                headers = if (headers.isNotEmpty()) headers else listOf("Col A"),
-                                rows = dataRows
+                                headers = headers,
+                                rows = dataRows,
+                                headerFonts = headerFonts,
+                                rowFonts = rowFonts
                             )
                         }
                     }
@@ -351,29 +734,51 @@ object OfficeDocumentHelper {
                 sheets["Error"] = ExcelTableData(listOf("Message"), listOf(listOf(e.message ?: "Failed to read CSV")))
             }
         } else if (resolvedFile != null) {
-            // Try XLSX parsing with ZipFile (random-access for shared strings + worksheets)
+            // Try XLSX parsing with ZipFile (random-access for styles + shared strings + worksheets)
             try {
                 ZipFile(resolvedFile).use { zip ->
-                    // 1. Parse xl/sharedStrings.xml
-                    val sharedStrings = mutableListOf<String>()
+                    var styleInfo = XlsxStyleInfo()
+                    val stylesEntry = zip.getEntry("xl/styles.xml")
+                    if (stylesEntry != null) {
+                        zip.getInputStream(stylesEntry).use { input ->
+                            styleInfo = parseXlsxStylesXml(input)
+                        }
+                        styleInfo.fontNamesById.filterNotNull().forEach { rawFontNames.add(it) }
+                    }
+
+                    val workbookSheetNames = mutableListOf<String>()
+                    val workbookEntry = zip.getEntry("xl/workbook.xml")
+                    if (workbookEntry != null) {
+                        zip.getInputStream(workbookEntry).use { input ->
+                            workbookSheetNames.addAll(parseXlsxWorkbookSheetNames(input))
+                        }
+                    }
+
+                    // Parse xl/sharedStrings.xml
+                    val sharedStrings = mutableListOf<Pair<String, String?>>()
                     val sstEntry = zip.getEntry("xl/sharedStrings.xml")
                     if (sstEntry != null) {
                         zip.getInputStream(sstEntry).use { input ->
                             sharedStrings.addAll(parseXlsxSharedStrings(input))
                         }
+                        sharedStrings.mapNotNull { it.second }.forEach { rawFontNames.add(it) }
                     }
 
-                    // 2. Discover sheets from xl/workbook.xml or find worksheets directly
+                    // Discover worksheets sorted numerically (sheet1, sheet2, ..., sheet10)
                     val sheetEntries = zip.entries().asSequence()
                         .filter { it.name.startsWith("xl/worksheets/sheet") && it.name.endsWith(".xml") }
-                        .sortedBy { it.name }
+                        .sortedBy { entry ->
+                            Regex("\\d+").find(entry.name.substringAfterLast('/'))?.value?.toIntOrNull()
+                                ?: Int.MAX_VALUE
+                        }
                         .toList()
 
                     if (sheetEntries.isNotEmpty()) {
                         sheetEntries.forEachIndexed { index, entry ->
-                            val sheetName = "Sheet ${index + 1}"
+                            val sheetName = workbookSheetNames.getOrNull(index)?.takeIf { it.isNotBlank() }
+                                ?: "Sheet ${index + 1}"
                             zip.getInputStream(entry).use { stream ->
-                                val tableData = parseXlsxWorksheet(stream, sharedStrings)
+                                val tableData = parseXlsxWorksheet(stream, sharedStrings, styleInfo)
                                 if (tableData.headers.isNotEmpty() || tableData.rows.isNotEmpty()) {
                                     sheets[sheetName] = tableData
                                 }
@@ -382,15 +787,72 @@ object OfficeDocumentHelper {
                     }
                 }
             } catch (e: Exception) {
-                // If standard XLSX zip parsing fails, try reading text streams or CSV fallback
+                // ZipInputStream fallback for non-random-access streams, then binary .xls fallback
                 try {
-                    val bytes = resolvedFile.readBytes()
-                    val fallbackTable = extractTableFromBinaryXls(bytes)
-                    if (fallbackTable.rows.isNotEmpty()) {
-                        sheets["Sheet 1"] = fallbackTable
+                    var stylesBytes: ByteArray? = null
+                    var workbookBytes: ByteArray? = null
+                    var sstBytes: ByteArray? = null
+                    val sheetBytesMap = linkedMapOf<String, ByteArray>()
+
+                    getInputStream(context, file, uriString)?.use { stream ->
+                        ZipInputStream(stream).use { zis ->
+                            var entry = zis.nextEntry
+                            while (entry != null) {
+                                when {
+                                    entry.name == "xl/styles.xml" -> stylesBytes = zis.readBytes()
+                                    entry.name == "xl/workbook.xml" -> workbookBytes = zis.readBytes()
+                                    entry.name == "xl/sharedStrings.xml" -> sstBytes = zis.readBytes()
+                                    entry.name.startsWith("xl/worksheets/sheet") && entry.name.endsWith(".xml") -> {
+                                        sheetBytesMap[entry.name] = zis.readBytes()
+                                    }
+                                }
+                                entry = zis.nextEntry
+                            }
+                        }
                     }
-                } catch (ex: Exception) {
-                    // Ignore
+
+                    if (sheetBytesMap.isNotEmpty()) {
+                        val styleInfo = stylesBytes?.let { parseXlsxStylesXml(ByteArrayInputStream(it)) }
+                            ?: XlsxStyleInfo()
+                        styleInfo.fontNamesById.filterNotNull().forEach { rawFontNames.add(it) }
+
+                        val workbookSheetNames = workbookBytes?.let {
+                            parseXlsxWorkbookSheetNames(ByteArrayInputStream(it))
+                        } ?: emptyList()
+
+                        val sharedStrings = sstBytes?.let {
+                            parseXlsxSharedStrings(ByteArrayInputStream(it))
+                        } ?: emptyList()
+                        sharedStrings.mapNotNull { it.second }.forEach { rawFontNames.add(it) }
+
+                        val sortedEntries = sheetBytesMap.entries.sortedBy { (name, _) ->
+                            Regex("\\d+").find(name.substringAfterLast('/'))?.value?.toIntOrNull()
+                                ?: Int.MAX_VALUE
+                        }
+                        sortedEntries.forEachIndexed { index, (_, bytes) ->
+                            val sheetName = workbookSheetNames.getOrNull(index)?.takeIf { it.isNotBlank() }
+                                ?: "Sheet ${index + 1}"
+                            val tableData = parseXlsxWorksheet(ByteArrayInputStream(bytes), sharedStrings, styleInfo)
+                            if (tableData.headers.isNotEmpty() || tableData.rows.isNotEmpty()) {
+                                sheets[sheetName] = tableData
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Fall through to binary .xls extraction
+                }
+
+                if (sheets.isEmpty()) {
+                    try {
+                        val bytes = resolvedFile.readBytes()
+                        val (fallbackTable, binaryFonts) = extractTableFromBinaryXls(bytes)
+                        rawFontNames.addAll(binaryFonts)
+                        if (fallbackTable.rows.isNotEmpty()) {
+                            sheets["Sheet 1"] = fallbackTable
+                        }
+                    } catch (_: Exception) {
+                        // Ignore
+                    }
                 }
             }
         }
@@ -405,7 +867,157 @@ object OfficeDocumentHelper {
             )
         }
 
-        ExcelDocument(file.nameWithoutExtension.ifBlank { "Excel Document" }, sheets)
+        // Compute primary detected font across all sheets
+        val fontFrequency = mutableMapOf<AppFonts.SupportedFont, Int>()
+        val sampleBuilder = StringBuilder()
+        var sampleCount = 0
+
+        for (table in sheets.values) {
+            table.headers.forEachIndexed { colIdx, text ->
+                if (sampleCount < 40 && text.isNotBlank()) {
+                    sampleBuilder.append(text).append(' ')
+                    sampleCount++
+                }
+                val f = table.headerFonts.getOrNull(colIdx)
+                    ?: AppFonts.detectFontForText(text, isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(text))
+                val weight = text.length.coerceAtLeast(1)
+                fontFrequency[f] = (fontFrequency[f] ?: 0) + weight
+            }
+            table.rows.forEachIndexed { rowIdx, row ->
+                val rowFontList = table.rowFonts.getOrNull(rowIdx)
+                row.forEachIndexed { colIdx, text ->
+                    if (sampleCount < 80 && text.isNotBlank()) {
+                        sampleBuilder.append(text).append(' ')
+                        sampleCount++
+                    }
+                    val f = rowFontList?.getOrNull(colIdx)
+                        ?: AppFonts.detectFontForText(text, isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(text))
+                    val weight = text.length.coerceAtLeast(1)
+                    fontFrequency[f] = (fontFrequency[f] ?: 0) + weight
+                }
+            }
+        }
+
+        val combinedSample = sampleBuilder.toString()
+        val hasUnicodeDevanagari = AppFonts.containsDevanagariUnicode(combinedSample)
+        val hasKrutiMetadata = rawFontNames.any {
+            it.contains("kruti", ignoreCase = true) ||
+                it.contains("devlys", ignoreCase = true) ||
+                it.contains("chanakya", ignoreCase = true)
+        }
+
+        val primaryFont = when {
+            !hasUnicodeDevanagari && hasKrutiMetadata -> AppFonts.SupportedFont.KRUTI_DEV
+            !hasUnicodeDevanagari && KrutiDevConverter.isLikelyKrutiDev(combinedSample) -> AppFonts.SupportedFont.KRUTI_DEV
+            else -> fontFrequency.maxByOrNull { it.value }?.key
+                ?: AppFonts.detectFontForText(combinedSample, rawFontNames.firstOrNull())
+        }
+
+        // Normalize cells that defaulted to ENGLISH_OPEN_SANS when workbook primary font is Kruti Dev
+        val normalizedSheets = if (primaryFont == AppFonts.SupportedFont.KRUTI_DEV) {
+            sheets.mapValues { (_, table) ->
+                val updatedHeaderFonts = table.headers.mapIndexed { idx, text ->
+                    val existing = table.headerFonts.getOrNull(idx) ?: AppFonts.SupportedFont.ENGLISH_OPEN_SANS
+                    if (!AppFonts.containsDevanagariUnicode(text) && existing == AppFonts.SupportedFont.ENGLISH_OPEN_SANS) {
+                        AppFonts.SupportedFont.KRUTI_DEV
+                    } else existing
+                }
+                val updatedRowFonts = table.rows.mapIndexed { rIdx, row ->
+                    val existingRow = table.rowFonts.getOrNull(rIdx)
+                    row.mapIndexed { cIdx, text ->
+                        val existing = existingRow?.getOrNull(cIdx) ?: AppFonts.SupportedFont.ENGLISH_OPEN_SANS
+                        if (!AppFonts.containsDevanagariUnicode(text) && existing == AppFonts.SupportedFont.ENGLISH_OPEN_SANS) {
+                            AppFonts.SupportedFont.KRUTI_DEV
+                        } else existing
+                    }
+                }
+                table.copy(headerFonts = updatedHeaderFonts, rowFonts = updatedRowFonts)
+            }
+        } else {
+            sheets
+        }
+
+        ExcelDocument(
+            title = file.nameWithoutExtension.ifBlank { "Excel Document" },
+            sheets = normalizedSheets,
+            primaryDetectedFont = primaryFont,
+            detectedFontNames = rawFontNames.toList()
+        )
+    }
+
+    private fun parseXlsxStylesXml(inputStream: InputStream): XlsxStyleInfo {
+        val fontNames = mutableListOf<String?>()
+        val xfFontNames = mutableListOf<String?>()
+        try {
+            val parser = Xml.newPullParser()
+            parser.setInput(inputStream, "UTF-8")
+
+            var eventType = parser.eventType
+            var insideFonts = false
+            var insideFont = false
+            var currentFontName: String? = null
+            var insideCellXfs = false
+
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        when (parser.name) {
+                            "fonts" -> insideFonts = true
+                            "font" -> if (insideFonts) {
+                                insideFont = true
+                                currentFontName = null
+                            }
+                            "name" -> if (insideFonts && insideFont) {
+                                currentFontName = getXmlAttr(parser, "val")?.trim()
+                            }
+                            "cellXfs" -> insideCellXfs = true
+                            "xf" -> if (insideCellXfs) {
+                                val fontId = getXmlAttr(parser, "fontId")?.toIntOrNull()
+                                val fontName = if (fontId != null && fontId in fontNames.indices) {
+                                    fontNames[fontId]
+                                } else null
+                                xfFontNames.add(fontName)
+                            }
+                        }
+                    }
+                    XmlPullParser.END_TAG -> {
+                        when (parser.name) {
+                            "font" -> if (insideFonts && insideFont) {
+                                fontNames.add(currentFontName)
+                                insideFont = false
+                            }
+                            "fonts" -> insideFonts = false
+                            "cellXfs" -> insideCellXfs = false
+                        }
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (_: Exception) {
+            // Optional styles; ignore malformed XML
+        }
+        return XlsxStyleInfo(fontNamesById = fontNames, xfToFontName = xfFontNames)
+    }
+
+    private fun parseXlsxWorkbookSheetNames(inputStream: InputStream): List<String> {
+        val names = mutableListOf<String>()
+        try {
+            val parser = Xml.newPullParser()
+            parser.setInput(inputStream, "UTF-8")
+            var eventType = parser.eventType
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                if (eventType == XmlPullParser.START_TAG && parser.name == "sheet") {
+                    val name = getXmlAttr(parser, "name")?.trim()
+                    if (!name.isNullOrBlank()) {
+                        names.add(name)
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (_: Exception) {
+            // Optional sheet names
+        }
+        return names
     }
 
     private fun parseCsvLine(line: String): List<String> {
@@ -436,28 +1048,36 @@ object OfficeDocumentHelper {
         return result
     }
 
-    private fun parseXlsxSharedStrings(inputStream: InputStream): List<String> {
-        val strings = mutableListOf<String>()
+    private fun parseXlsxSharedStrings(inputStream: InputStream): List<Pair<String, String?>> {
+        val strings = mutableListOf<Pair<String, String?>>()
         val parser = Xml.newPullParser()
         parser.setInput(inputStream, "UTF-8")
 
         var eventType = parser.eventType
         var currentString = StringBuilder()
+        var firstRunFont: String? = null
         var insideSi = false
 
         while (eventType != XmlPullParser.END_DOCUMENT) {
             when (eventType) {
                 XmlPullParser.START_TAG -> {
-                    if (parser.name == "si") {
-                        insideSi = true
-                        currentString = StringBuilder()
-                    } else if (insideSi && parser.name == "t") {
-                        currentString.append(parser.nextText())
+                    when (parser.name) {
+                        "si" -> {
+                            insideSi = true
+                            currentString = StringBuilder()
+                            firstRunFont = null
+                        }
+                        "rFont" -> if (insideSi && firstRunFont == null) {
+                            firstRunFont = getXmlAttr(parser, "val")?.trim()
+                        }
+                        "t" -> if (insideSi) {
+                            currentString.append(parser.nextText())
+                        }
                     }
                 }
                 XmlPullParser.END_TAG -> {
                     if (parser.name == "si") {
-                        strings.add(currentString.toString())
+                        strings.add(Pair(currentString.toString(), firstRunFont))
                         insideSi = false
                     }
                 }
@@ -469,16 +1089,18 @@ object OfficeDocumentHelper {
 
     private fun parseXlsxWorksheet(
         inputStream: InputStream,
-        sharedStrings: List<String>
+        sharedStrings: List<Pair<String, String?>>,
+        styleInfo: XlsxStyleInfo = XlsxStyleInfo()
     ): ExcelTableData {
-        val allRows = mutableListOf<List<String>>()
+        val allRows = mutableListOf<List<Pair<String, AppFonts.SupportedFont>>>()
         val parser = Xml.newPullParser()
         parser.setInput(inputStream, "UTF-8")
 
         var eventType = parser.eventType
-        var currentRowMap = mutableMapOf<Int, String>()
+        var currentRowMap = mutableMapOf<Int, Pair<String, AppFonts.SupportedFont>>()
         var currentCellCol = 0
         var currentCellType = ""
+        var currentStyleFont: String? = null
         var maxColIndex = 0
 
         while (eventType != XmlPullParser.END_DOCUMENT) {
@@ -489,32 +1111,50 @@ object OfficeDocumentHelper {
                             currentRowMap = mutableMapOf()
                         }
                         "c" -> {
-                            val rAttr = parser.getAttributeValue(null, "r") ?: ""
+                            val rAttr = getXmlAttr(parser, "r") ?: ""
                             currentCellCol = extractColumnIndex(rAttr)
                             if (currentCellCol > maxColIndex) maxColIndex = currentCellCol
-                            currentCellType = parser.getAttributeValue(null, "t") ?: ""
+                            currentCellType = getXmlAttr(parser, "t") ?: ""
+                            val styleIdx = getXmlAttr(parser, "s")?.toIntOrNull()
+                            currentStyleFont = if (styleIdx != null) {
+                                styleInfo.xfToFontName.getOrNull(styleIdx)
+                            } else null
                         }
                         "v" -> {
                             val vText = parser.nextText()
-                            val cellValue = if (currentCellType == "s") {
-                                val sstIndex = vText.toIntOrNull()
-                                if (sstIndex != null && sstIndex in sharedStrings.indices) {
-                                    sharedStrings[sstIndex]
-                                } else {
-                                    vText
+                            var fontName = currentStyleFont
+                            val cellValue = when (currentCellType) {
+                                "s" -> {
+                                    val sstIndex = vText.toIntOrNull()
+                                    if (sstIndex != null && sstIndex in sharedStrings.indices) {
+                                        val (sstText, sstFont) = sharedStrings[sstIndex]
+                                        if (!sstFont.isNullOrBlank()) fontName = sstFont
+                                        sstText
+                                    } else {
+                                        vText
+                                    }
                                 }
-                            } else if (currentCellType == "b") {
-                                if (vText == "1") "TRUE" else "FALSE"
-                            } else {
-                                formatNumericCell(vText)
+                                "b" -> if (vText == "1") "TRUE" else "FALSE"
+                                "str", "e" -> vText
+                                else -> formatNumericCell(vText)
                             }
-                            currentRowMap[currentCellCol] = cellValue
+                            val detected = AppFonts.detectFontForText(
+                                text = cellValue,
+                                declaredFontName = fontName,
+                                isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(cellValue)
+                            )
+                            currentRowMap[currentCellCol] = Pair(cellValue, detected)
                         }
                         "t" -> {
                             // Inline string <is><t>
                             if (currentCellType == "inlineStr") {
                                 val text = parser.nextText()
-                                currentRowMap[currentCellCol] = text
+                                val detected = AppFonts.detectFontForText(
+                                    text = text,
+                                    declaredFontName = currentStyleFont,
+                                    isKrutiLikely = KrutiDevConverter.isLikelyKrutiDev(text)
+                                )
+                                currentRowMap[currentCellCol] = Pair(text, detected)
                             }
                         }
                     }
@@ -522,12 +1162,13 @@ object OfficeDocumentHelper {
                 XmlPullParser.END_TAG -> {
                     if (parser.name == "row") {
                         if (currentRowMap.isNotEmpty()) {
-                            val rowList = mutableListOf<String>()
+                            val rowList = mutableListOf<Pair<String, AppFonts.SupportedFont>>()
                             for (c in 0..maxColIndex) {
-                                rowList.add(currentRowMap[c] ?: "")
+                                rowList.add(
+                                    currentRowMap[c] ?: Pair("", AppFonts.SupportedFont.ENGLISH_OPEN_SANS)
+                                )
                             }
-                            // Only add if not entirely blank
-                            if (rowList.any { it.isNotBlank() }) {
+                            if (rowList.any { it.first.isNotBlank() }) {
                                 allRows.add(rowList)
                             }
                         }
@@ -541,13 +1182,32 @@ object OfficeDocumentHelper {
             return ExcelTableData(listOf("Column A", "Column B"), emptyList())
         }
 
+        val normalizedColCount = maxOf(maxColIndex + 1, allRows.maxOfOrNull { it.size } ?: 0)
         val firstRow = allRows.first()
-        val headers = firstRow.mapIndexed { idx, value ->
+        val headers = (0 until normalizedColCount).map { idx ->
+            val value = firstRow.getOrNull(idx)?.first ?: ""
             if (value.isNotBlank()) value else getColumnName(idx)
         }
-        val dataRows = allRows.drop(1)
+        val headerFonts = (0 until normalizedColCount).map { idx ->
+            firstRow.getOrNull(idx)?.second ?: AppFonts.SupportedFont.ENGLISH_OPEN_SANS
+        }
 
-        return ExcelTableData(headers, dataRows)
+        val dataEntries = allRows.drop(1)
+        val dataRows = dataEntries.map { row ->
+            (0 until normalizedColCount).map { idx -> row.getOrNull(idx)?.first ?: "" }
+        }
+        val rowFonts = dataEntries.map { row ->
+            (0 until normalizedColCount).map { idx ->
+                row.getOrNull(idx)?.second ?: AppFonts.SupportedFont.ENGLISH_OPEN_SANS
+            }
+        }
+
+        return ExcelTableData(
+            headers = headers,
+            rows = dataRows,
+            headerFonts = headerFonts,
+            rowFonts = rowFonts
+        )
     }
 
     private fun extractColumnIndex(cellRef: String): Int {
@@ -583,12 +1243,21 @@ object OfficeDocumentHelper {
         }
     }
 
-    private fun extractTableFromBinaryXls(bytes: ByteArray): ExcelTableData {
-        val extracted = extractCleanTextFromDocBytes(bytes)
+    private fun extractTableFromBinaryXls(bytes: ByteArray): Pair<ExcelTableData, List<String>> {
+        val (extracted, fontNames) = extractCleanTextFromDocBytes(bytes)
         if (extracted.isEmpty()) {
-            return ExcelTableData(listOf("Content"), emptyList())
+            return Pair(ExcelTableData(listOf("Content"), emptyList()), fontNames)
         }
         val rows = extracted.map { listOf(it.text) }
-        return ExcelTableData(listOf("Extracted Content"), rows)
+        val rowFonts = extracted.map { listOf(it.detectedFont) }
+        return Pair(
+            ExcelTableData(
+                headers = listOf("Extracted Content"),
+                rows = rows,
+                headerFonts = listOf(AppFonts.SupportedFont.ENGLISH_OPEN_SANS),
+                rowFonts = rowFonts
+            ),
+            fontNames
+        )
     }
 }

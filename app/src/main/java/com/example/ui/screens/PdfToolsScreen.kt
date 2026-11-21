@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,7 +39,6 @@ import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Delete
@@ -45,6 +46,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -63,11 +66,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,8 +85,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ads.AdMobManager
+import com.example.ads.AdManager
 import com.example.pdf.PdfToolsHelper
+import com.example.ui.components.AppUpdateToolsCard
 import com.example.ui.theme.BrandCrimson
 import com.example.ui.theme.BrandPrimary
 import com.example.ui.theme.TextPrimary
@@ -92,6 +98,8 @@ import com.example.ui.theme.WhiteMixBorder
 import com.example.ui.theme.WhiteMixCard
 import com.example.ui.theme.WhiteMixSurface
 import com.example.ui.viewmodel.PdfViewModel
+import com.example.update.AppUpdateManager
+import kotlinx.coroutines.launch
 import java.io.File
 
 data class ToolItem(
@@ -112,8 +120,16 @@ fun PdfToolsScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
+    val scope = rememberCoroutineScope()
     val isProcessing by viewModel.isProcessing.collectAsState()
     val progressMessage by viewModel.progressMessage.collectAsState()
+    val isRewardedAdLoading by AdManager.isRewardedLoadingFlow.collectAsState()
+    val updateState by AppUpdateManager.state.collectAsState()
+
+    LaunchedEffect(Unit) {
+        AdManager.loadRewarded(context.applicationContext)
+        AdManager.loadInterstitial(context.applicationContext)
+    }
 
     var isProUnlocked by remember { mutableStateOf(false) }
 
@@ -127,9 +143,6 @@ fun PdfToolsScreen(
     var showCompressDialog by remember { mutableStateOf(false) }
     var selectedPdfForCompress by remember { mutableStateOf<File?>(null) }
 
-    var showMergeDialog by remember { mutableStateOf(false) }
-    var selectedPdfsForMerge by remember { mutableStateOf<List<File>>(emptyList()) }
-
     var showSplitDialog by remember { mutableStateOf(false) }
     var selectedPdfForSplit by remember { mutableStateOf<File?>(null) }
 
@@ -141,6 +154,8 @@ fun PdfToolsScreen(
     var lockPinInput by remember { mutableStateOf("") }
     var lockPinConfirmInput by remember { mutableStateOf("") }
     var lockPinError by remember { mutableStateOf<String?>(null) }
+
+    var showShareAppDialog by remember { mutableStateOf(false) }
 
     val allPdfsList by viewModel.allPdfs.collectAsState()
 
@@ -208,24 +223,6 @@ fun PdfToolsScreen(
         }
     }
 
-    val pdfPickerForMerge = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris: List<Uri> ->
-        if (uris.size < 2) {
-            Toast.makeText(context, "Select at least 2 PDF files to merge", Toast.LENGTH_SHORT).show()
-        } else {
-            val copiedFiles = uris.mapIndexedNotNull { index, uri ->
-                copyUriToTempFile(context, uri, "merge_input_${index}_${System.currentTimeMillis() % 1000}.pdf")
-            }
-            if (copiedFiles.size >= 2) {
-                selectedPdfsForMerge = copiedFiles
-                showMergeDialog = true
-            } else {
-                Toast.makeText(context, "Could not load selected files", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
     val pdfPickerForSplit = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -273,14 +270,6 @@ fun PdfToolsScreen(
                 iconBg = Color(0xFFFEF3C7)
             ),
             ToolItem(
-                id = "merge_pdf",
-                title = "Merge PDFs",
-                description = "Combine multiple PDF documents into a single organized file",
-                icon = Icons.Default.CallMerge,
-                iconColor = Color(0xFF7C3AED),
-                iconBg = Color(0xFFEDE9FE)
-            ),
-            ToolItem(
                 id = "split_pdf",
                 title = "Split PDF",
                 description = "Extract selected page ranges or sheets into a new PDF",
@@ -295,12 +284,21 @@ fun PdfToolsScreen(
                 icon = Icons.Default.Lock,
                 iconColor = BrandCrimson,
                 iconBg = Color(0xFFFEE2E2)
+            ),
+            ToolItem(
+                id = "share_app",
+                title = "Share App",
+                description = "Refer Narayani PDF Reader to friends, team, and family",
+                icon = Icons.Default.Share,
+                iconColor = Color(0xFF8B5CF6),
+                iconBg = Color(0xFFEDE9FE)
             )
         )
     }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         containerColor = WhiteMixBackground,
         topBar = {
             Surface(
@@ -347,40 +345,65 @@ fun PdfToolsScreen(
                                 )
                             }
 
-                            // Rewarded Ad trigger to unlock Pro tools
-                            if (!isProUnlocked) {
-                                OutlinedButton(
-                                    onClick = {
-                                        if (activity != null) {
-                                            AdMobManager.showRewardedAd(
-                                                activity = activity,
-                                                onUserEarnedReward = {
-                                                    isProUnlocked = true
-                                                    Toast.makeText(context, "Ultra HD & Pro Features Unlocked!", Toast.LENGTH_LONG).show()
-                                                },
-                                                onAdClosed = {}
-                                            )
-                                        }
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(32.dp)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { showShareAppDialog = true },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .testTag("tools_share_app_icon_button")
                                 ) {
-                                    Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFD97706), modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Unlock Pro (Ad)", fontSize = 11.sp, color = Color(0xFFD97706), fontWeight = FontWeight.Bold)
-                                }
-                            } else {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = Color(0xFFFEF3C7)
-                                ) {
-                                    Text(
-                                        "PRO Active",
-                                        color = Color(0xFFD97706),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Share App",
+                                        tint = Color(0xFF8B5CF6),
+                                        modifier = Modifier.size(20.dp)
                                     )
+                                }
+
+                                Spacer(modifier = Modifier.width(4.dp))
+
+                                // Rewarded Ad trigger to unlock Pro tools
+                                if (!isProUnlocked) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            AdManager.showRewardedAd(activity) {
+                                                isProUnlocked = true
+                                                Toast.makeText(context, "Ultra HD & Pro Features Unlocked!", Toast.LENGTH_LONG).show()
+                                            }
+                                        },
+                                        enabled = !isRewardedAdLoading,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier
+                                            .height(32.dp)
+                                            .testTag("tools_unlock_pro_ad_button")
+                                    ) {
+                                        if (isRewardedAdLoading) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp),
+                                                strokeWidth = 2.dp,
+                                                color = Color(0xFFD97706)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Loading Ad...", fontSize = 11.sp, color = Color(0xFFD97706), fontWeight = FontWeight.Bold)
+                                        } else {
+                                            Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFD97706), modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Unlock Pro (Ad)", fontSize = 11.sp, color = Color(0xFFD97706), fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFFEF3C7)
+                                    ) {
+                                        Text(
+                                            "PRO Active",
+                                            color = Color(0xFFD97706),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -413,9 +436,31 @@ fun PdfToolsScreen(
                                 "edit_pdf" -> pdfPickerForEdit.launch(arrayOf("application/pdf"))
                                 "image_to_pdf" -> imagePicker.launch("image/*")
                                 "compress_pdf" -> pdfPickerForCompress.launch(arrayOf("application/pdf"))
-                                "merge_pdf" -> pdfPickerForMerge.launch("application/pdf")
                                 "split_pdf" -> pdfPickerForSplit.launch(arrayOf("application/pdf"))
                                 "lock_pdf" -> pdfPickerForLock.launch(arrayOf("application/pdf"))
+                                "share_app" -> showShareAppDialog = true
+                            }
+                        }
+                    )
+                }
+
+                item(span = { GridItemSpan(maxLineSpan) }, key = "app_update_card") {
+                    AppUpdateToolsCard(
+                        state = updateState,
+                        onCheckUpdate = {
+                            scope.launch {
+                                AppUpdateManager.checkForUpdates(
+                                    context = context.applicationContext,
+                                    isManual = true
+                                )
+                            }
+                        },
+                        onUpdateNow = { release ->
+                            scope.launch {
+                                AppUpdateManager.downloadAndInstallApk(
+                                    context = context.applicationContext,
+                                    release = release
+                                )
                             }
                         }
                     )
@@ -504,7 +549,7 @@ fun PdfToolsScreen(
                             jpgConversionResult = result
                             // Interstitial on task completion
                             if (activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
+                                AdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -588,7 +633,7 @@ fun PdfToolsScreen(
                         showImageToPdfDialog = false
                         viewModel.executeImagesToPdf(context, selectedImageUris, pdfTitle) {
                             if (activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
+                                AdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -628,118 +673,55 @@ fun PdfToolsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(level.label, fontSize = 12.sp)
+                            if (level == PdfToolsHelper.CompressionLevel.HIGH && !isProUnlocked) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "(Ad)",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFD97706)
+                                )
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
+                val requiresReward = selectedLevel == PdfToolsHelper.CompressionLevel.HIGH && !isProUnlocked
                 Button(
                     onClick = {
                         val file = selectedPdfForCompress!!
-                        showCompressDialog = false
-                        viewModel.executeCompressPdf(file, selectedLevel) {
-                            if (activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
+                        if (requiresReward) {
+                            AdManager.showRewardedAd(activity) {
+                                isProUnlocked = true
+                                showCompressDialog = false
+                                viewModel.executeCompressPdf(file, selectedLevel) {}
+                            }
+                        } else {
+                            showCompressDialog = false
+                            viewModel.executeCompressPdf(file, selectedLevel) {
+                                AdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
+                    enabled = !(requiresReward && isRewardedAdLoading),
                     colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)
                 ) {
-                    Text("Compress")
+                    if (requiresReward && isRewardedAdLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Loading Ad...")
+                    } else {
+                        Text(if (requiresReward) "Watch Ad & Compress" else "Compress")
+                    }
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showCompressDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // Merge Dialog
-    if (showMergeDialog && selectedPdfsForMerge.isNotEmpty()) {
-        var mergeTitle by remember { mutableStateOf("Merged_Document_${System.currentTimeMillis() % 10000}") }
-        var currentMergeFiles by remember { mutableStateOf(selectedPdfsForMerge) }
-
-        AlertDialog(
-            onDismissRequest = { showMergeDialog = false },
-            title = {
-                Text(
-                    text = "Merge PDFs",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            },
-            text = {
-                Column {
-                    Text(
-                        text = "${currentMergeFiles.size} PDFs selected in merge order:",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = TextPrimary
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 160.dp)
-                    ) {
-                        currentMergeFiles.forEachIndexed { idx, file ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "${idx + 1}. ${file.name}",
-                                    fontSize = 12.sp,
-                                    color = TextSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (currentMergeFiles.size > 2) {
-                                    IconButton(
-                                        onClick = {
-                                            currentMergeFiles = currentMergeFiles.toMutableList().also { it.removeAt(idx) }
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(Icons.Default.Delete, contentDescription = "Remove", tint = BrandCrimson, modifier = Modifier.size(16.dp))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = mergeTitle,
-                        onValueChange = { mergeTitle = it },
-                        singleLine = true,
-                        label = { Text("Output PDF Name") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val filesToMerge = currentMergeFiles
-                        showMergeDialog = false
-                        viewModel.executeMergePdfs(context, filesToMerge, mergeTitle) { success ->
-                            if (success && activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)
-                ) {
-                    Text("Merge Now")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showMergeDialog = false }) {
                     Text("Cancel")
                 }
             }
@@ -834,7 +816,7 @@ fun PdfToolsScreen(
                         showSplitDialog = false
                         viewModel.executeSplitPdf(context, file, from, to, splitTitle) { success ->
                             if (success && activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
+                                AdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -989,6 +971,227 @@ fun PdfToolsScreen(
             }
         )
     }
+
+    // Interactive Share App & Referral Dialog
+    if (showShareAppDialog) {
+        val packageName = context.packageName
+        val appName = "Narayani PDF Reader"
+        val referralLink = "https://play.google.com/store/apps/details?id=$packageName"
+        val shareMessage = "🚀 Check out $appName - The ultimate All-in-One Document Reader & PDF Toolkit!\n\n" +
+                "✨ Features:\n" +
+                "• Read PDF, Word & Excel files lightning fast\n" +
+                "• PDF to JPG & Image to PDF converter\n" +
+                "• Compress & Split PDF files\n" +
+                "• 4-Digit PIN Security for confidential docs\n" +
+                "• Annotate, Sign & Draw on documents\n\n" +
+                "📲 Download now from Google Play:\n$referralLink"
+
+        AlertDialog(
+            onDismissRequest = { showShareAppDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFEDE9FE),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = null,
+                                tint = Color(0xFF8B5CF6),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "Share App • रेफर करें",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Invite friends & family to $appName",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFF9FAFB),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE5E7EB))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.narayani_pdf_logo_1793504887925),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(RoundedCornerShape(6.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = appName,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Fast, Secure & Pro Tools",
+                                        fontSize = 11.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "अपने दोस्तों और परिवार के साथ Narayani PDF Reader शेयर करें ताकि वे भी आसानी से सभी PDF, Word, Excel पढ़ सकें और टूल्स का लाभ उठा सकें।",
+                                fontSize = 11.sp,
+                                color = TextSecondary,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Invite Link Preview Box
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFEFF6FF),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBFDBFE))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = referralLink,
+                                fontSize = 11.sp,
+                                color = BrandPrimary,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            IconButton(
+                                onClick = {
+                                    copyToClipboard(context, "App Link", referralLink)
+                                    Toast.makeText(context, "Link copied to clipboard! (लिंक कॉपी हो गया)", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy Link",
+                                    tint = BrandPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showShareAppDialog = false
+                        launchAppShareIntent(context, shareMessage)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8B5CF6)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Share Now (शेयर करें)", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showShareAppDialog = false }) {
+                    Text("Close", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    // On-Demand Rewarded Ad Loading Dialog
+    if (isRewardedAdLoading) {
+        AlertDialog(
+            onDismissRequest = { AdManager.cancelPendingRewardedAd() },
+            title = {
+                Text(
+                    text = "Loading Reward Ad...",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = BrandPrimary,
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 3.dp
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Text(
+                        text = "Preparing your ad to unlock Pro features. It will open automatically in a moment.",
+                        fontSize = 13.sp,
+                        color = TextSecondary,
+                        lineHeight = 18.sp
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { AdManager.cancelPendingRewardedAd() }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        )
+    }
+}
+
+private fun launchAppShareIntent(context: Context, message: String) {
+    try {
+        val sendIntent = Intent().apply {
+            action = Intent.ACTION_SEND
+            putExtra(Intent.EXTRA_TEXT, message)
+            type = "text/plain"
+        }
+        val shareIntent = Intent.createChooser(sendIntent, "Share Narayani PDF Reader via")
+        shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(shareIntent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Unable to launch share sheet", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun copyToClipboard(context: Context, label: String, text: String) {
+    try {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = android.content.ClipData.newPlainText(label, text)
+        clipboard.setPrimaryClip(clip)
+    } catch (e: Exception) {}
 }
 
 private fun getFileNameFromUri(context: Context, uri: Uri): String {

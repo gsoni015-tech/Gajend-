@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -49,17 +50,12 @@ import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.ViewAgenda
-import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material.icons.filled.ViewSidebar
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -92,16 +88,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
-import com.example.ads.AdMobManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import com.example.ads.AdManager
+import com.example.ads.AdaptiveBannerAdView
+import com.example.data.cache.PdfFastCacheManager
 import com.example.data.local.PdfEntity
 import com.example.pdf.PdfToolsHelper
-import com.example.reader.TextToSpeechHelper
 import com.example.ui.components.ComposePdfViewer
 import com.example.ui.components.PdfViewerScrollMode
 import com.example.ui.theme.BrandCrimson
@@ -112,6 +112,7 @@ import com.example.ui.theme.WhiteMixBackground
 import com.example.ui.theme.WhiteMixSurface
 import com.example.ui.viewmodel.PdfViewModel
 import com.example.ui.viewmodel.ReaderThemeMode
+import kotlinx.coroutines.flow.first
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -125,29 +126,48 @@ fun PdfViewerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
-    val file = remember(entity.path) { File(entity.path) }
-
-    // Preload interstitial when screen opens
-    LaunchedEffect(Unit) {
-        AdMobManager.loadInterstitial(context.applicationContext)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var file by remember(entity.path) {
+        mutableStateOf(
+            PdfFastCacheManager.getFastReadableFileIfPresent(context, entity) ?: File(entity.path)
+        )
+    }
+    LaunchedEffect(entity.path) {
+        val fastFile = PdfFastCacheManager.getOrWarmFastFile(context, entity)
+        if (fastFile != null && (!file.exists() || !file.canRead())) {
+            file = fastFile
+        }
     }
 
-    // Interstitial Ad trigger on device Back press with cooldown protection
-    val handleBackPress: () -> Unit = {
-        if (activity != null) {
-            AdMobManager.showBackPressInterstitial(activity) { onBack() }
-        } else {
-            onBack()
+    // Preload interstitial and schedule Impression #2 mid-reading (15s + remaining 60s cooldown)
+    var hasAttemptedInDocAd by remember(entity.path) { mutableStateOf(false) }
+    LaunchedEffect(entity.path, lifecycleOwner) {
+        AdManager.loadInterstitial(context.applicationContext)
+        if (!hasAttemptedInDocAd) {
+            val cooldownRemaining = AdManager.remainingInterstitialCooldownMs()
+            val waitMs = maxOf(AdManager.DOCUMENT_READING_AD_DELAY_MS, cooldownRemaining + 500L)
+            kotlinx.coroutines.delay(waitMs)
+            AdManager.loadInterstitial(context.applicationContext)
+            AdManager.isInterstitialReadyFlow.first { it }
+            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                if (!hasAttemptedInDocAd) {
+                    hasAttemptedInDocAd = true
+                    AdManager.showDelayedDocumentInterstitial(activity)
+                }
+            }
         }
+    }
+
+    // Interstitial Ad trigger on device Back press with strict 60s cooldown protection
+    val handleBackPress: () -> Unit = {
+        AdManager.showBackPressInterstitial(activity) { onBack() }
     }
 
     var showThumbnailBottomSheet by remember { mutableStateOf(false) }
     var showThumbnailDrawer by remember { mutableStateOf(false) }
     var showThumbnailStrip by remember { mutableStateOf(false) }
 
-    var scrollMode by remember { mutableStateOf(PdfViewerScrollMode.CONTINUOUS_VERTICAL) }
     var readerTheme by remember { mutableStateOf(ReaderThemeMode.LIGHT) }
-    var isPageLocked by remember { mutableStateOf(true) }
     var currentPage by remember { mutableIntStateOf(1) }
     var totalPages by remember { mutableIntStateOf(1) }
     var showGoToPageDialog by remember { mutableStateOf(false) }
@@ -165,9 +185,11 @@ fun PdfViewerScreen(
     var extractedTextContent by remember { mutableStateOf<PageTextContent?>(null) }
     var isExtractingPage by remember { mutableStateOf(false) }
 
-    LaunchedEffect(entity.path) {
+    LaunchedEffect(file.absolutePath) {
         try {
-            allPdfTextMap = PdfTextExtractor.extractAllText(file)
+            if (file.exists() && file.canRead()) {
+                allPdfTextMap = PdfTextExtractor.extractAllText(file)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -222,17 +244,12 @@ fun PdfViewerScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showCompressDialog by remember { mutableStateOf(false) }
-    var isTtsActive by remember { mutableStateOf(false) }
 
     val isBookmarked by viewModel.currentBookmarkStatus.collectAsState()
 
-    val ttsHelper = remember { TextToSpeechHelper(context) }
-    DisposableEffect(Unit) {
-        onDispose { ttsHelper.shutdown() }
-    }
-
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         containerColor = when (readerTheme) {
             ReaderThemeMode.LIGHT -> WhiteMixBackground
             ReaderThemeMode.SEPIA -> Color(0xFFFBF0D9)
@@ -463,47 +480,6 @@ fun PdfViewerScreen(
                         )
                     }
 
-                    // View Mode Toggle (Vertical Continuous vs Horizontal Paged)
-                    IconButton(
-                        onClick = {
-                            scrollMode = if (scrollMode == PdfViewerScrollMode.CONTINUOUS_VERTICAL) {
-                                PdfViewerScrollMode.PAGED_HORIZONTAL
-                            } else {
-                                PdfViewerScrollMode.CONTINUOUS_VERTICAL
-                            }
-                        },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (scrollMode == PdfViewerScrollMode.CONTINUOUS_VERTICAL) Icons.Default.ViewAgenda else Icons.Default.ViewCarousel,
-                            contentDescription = "Toggle Scroll Mode",
-                            tint = BrandPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Page Lock Toggle (Locks page in center to prevent sliding left-right off screen)
-                    IconButton(
-                        onClick = {
-                            isPageLocked = !isPageLocked
-                            Toast.makeText(
-                                context,
-                                if (isPageLocked) "🔒 Page Locked: Page will stay in center" else "🔓 Page Unlocked: Free pan enabled",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("viewer_page_lock_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isPageLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = if (isPageLocked) "Page Locked (Tap to Unlock)" else "Page Unlocked (Tap to Lock)",
-                            tint = if (isPageLocked) BrandPrimary else TextSecondary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
                     // Page Thumbnails Navigation Sheet
                     IconButton(
                         onClick = { showThumbnailBottomSheet = !showThumbnailBottomSheet },
@@ -515,27 +491,6 @@ fun PdfViewerScreen(
                             imageVector = Icons.Default.GridView,
                             contentDescription = "Page Thumbnails",
                             tint = if (showThumbnailBottomSheet) BrandCrimson else BrandPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Text to Speech
-                    IconButton(
-                        onClick = {
-                            if (isTtsActive) {
-                                ttsHelper.stop()
-                                isTtsActive = false
-                            } else {
-                                isTtsActive = true
-                                ttsHelper.speak("Reading page $currentPage of ${entity.title}.")
-                            }
-                        },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isTtsActive) Icons.Default.Stop else Icons.Default.VolumeUp,
-                            contentDescription = "Read Aloud",
-                            tint = if (isTtsActive) BrandCrimson else BrandPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -588,25 +543,6 @@ fun PdfViewerScreen(
                             expanded = showMenu,
                             onDismissRequest = { showMenu = false }
                         ) {
-                            DropdownMenuItem(
-                                text = { Text(if (isPageLocked) "Unlock Horizontal Move" else "Lock Page Position (Default)") },
-                                onClick = {
-                                    showMenu = false
-                                    isPageLocked = !isPageLocked
-                                    Toast.makeText(
-                                        context,
-                                        if (isPageLocked) "🔒 Page Locked: Page will stay in center" else "🔓 Page Unlocked: Free pan enabled",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = if (isPageLocked) Icons.Default.LockOpen else Icons.Default.Lock,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            )
                             DropdownMenuItem(
                                 text = { Text(if (showThumbnailStrip) "Hide Thumbnail Strip" else "Thumbnail Filmstrip") },
                                 onClick = {
@@ -702,25 +638,43 @@ fun PdfViewerScreen(
                 }
             }
         }
+        }
+        },
+        bottomBar = {
+        Surface(
+            color = if (readerTheme == ReaderThemeMode.DARK) Color(0xFF1E1E1E) else WhiteMixSurface,
+            shadowElevation = 4.dp
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding(),
+                contentAlignment = Alignment.Center
+            ) {
+                AdaptiveBannerAdView(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 728.dp)
+                )
+            }
+        }
     }
-}
     ) { padding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .navigationBarsPadding()
         ) {
             ComposePdfViewer(
                 file = file,
                 uriString = entity.uriString,
-                scrollMode = scrollMode,
+                scrollMode = PdfViewerScrollMode.CONTINUOUS_VERTICAL,
                 readerTheme = readerTheme,
                 targetPage = targetPageToJump,
                 showThumbnailBottomSheet = showThumbnailBottomSheet,
                 showThumbnailDrawer = showThumbnailDrawer,
                 showThumbnailStrip = showThumbnailStrip,
-                isPageLocked = isPageLocked,
+                isPageLocked = false,
                 onCloseThumbnailBottomSheet = { showThumbnailBottomSheet = false },
                 onCloseThumbnailDrawer = { showThumbnailDrawer = false },
                 onCloseThumbnailStrip = { showThumbnailStrip = false },
@@ -931,9 +885,7 @@ fun PdfViewerScreen(
                     onClick = {
                         showCompressDialog = false
                         viewModel.executeCompressPdf(file, selectedLevel) {
-                            if (activity != null) {
-                                AdMobManager.showTaskCompletionInterstitial(activity) {}
-                            }
+                            AdManager.showTaskCompletionInterstitial(activity) {}
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)

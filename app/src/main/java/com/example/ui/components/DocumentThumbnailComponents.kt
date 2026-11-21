@@ -9,8 +9,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +29,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.roundToInt
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -63,6 +73,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -101,18 +112,26 @@ fun DocumentThumbnailView(
     showFormatBadge: Boolean = true
 ) {
     val context = LocalContext.current
-    var thumbnailBitmap by remember(entity.path, entity.lastModifiedTimestamp) {
-        mutableStateOf<Bitmap?>(null)
-    }
-    var isLoading by remember(entity.path) { mutableStateOf(entity.documentType == DocumentType.PDF) }
+    val targetW = remember(width) { width.value.toInt() * 3 }
+    val targetH = remember(height) { height.value.toInt() * 3 }
 
-    LaunchedEffect(entity.path, entity.lastModifiedTimestamp) {
-        if (entity.documentType == DocumentType.PDF) {
-            val bmp = PdfDocumentThumbnailLoader.loadThumbnail(context, entity, width.value.toInt() * 3, height.value.toInt() * 3)
-            thumbnailBitmap = bmp
-            isLoading = false
-        } else {
-            isLoading = false
+    // Instant synchronous memory-cache hit avoids flicker & spinning progress bars during scroll
+    var thumbnailImage by remember(entity.path, entity.lastModifiedTimestamp, targetW) {
+        mutableStateOf<ImageBitmap?>(PdfDocumentThumbnailLoader.getCachedImageBitmap(entity, targetW))
+    }
+
+    LaunchedEffect(entity.path, entity.lastModifiedTimestamp, targetW) {
+        if (thumbnailImage == null && entity.documentType == DocumentType.PDF) {
+            val loaded = PdfDocumentThumbnailLoader.loadThumbnailImageBitmap(
+                context = context,
+                entity = entity,
+                targetWidth = targetW,
+                targetHeight = targetH,
+                delayBeforeNativeRenderMs = 50L
+            )
+            if (loaded != null) {
+                thumbnailImage = loaded
+            }
         }
     }
 
@@ -130,92 +149,73 @@ fun DocumentThumbnailView(
         DocumentType.OTHER -> Icons.Default.Description
     }
 
-    Surface(
+    Box(
         modifier = modifier
             .size(width, height)
             .clip(RoundedCornerShape(6.dp))
-            .border(BorderStroke(1.dp, WhiteMixBorder), RoundedCornerShape(6.dp)),
-        shape = RoundedCornerShape(6.dp),
-        color = Color(0xFFF9FAFB),
-        shadowElevation = 1.dp
+            .background(Color(0xFFF9FAFB))
+            .border(1.dp, WhiteMixBorder, RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            if (thumbnailBitmap != null) {
-                // Actual First-Page Rendered Preview
-                Image(
-                    bitmap = thumbnailBitmap!!.asImageBitmap(),
-                    contentDescription = "Preview of ${entity.title}",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+        val image = thumbnailImage
+        if (image != null) {
+            // Actual First-Page Rendered Preview
+            Image(
+                bitmap = image,
+                contentDescription = "Preview of ${entity.title}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            // Static lightweight placeholder / fallback icon (no continuous spinner animation while scrolling)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(iconColor.copy(alpha = 0.08f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = iconVector,
+                    contentDescription = null,
+                    tint = iconColor,
+                    modifier = Modifier.size((width.value * 0.45f).dp)
                 )
-            } else if (isLoading) {
-                // Loading Placeholder
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color(0xFFF3F4F6)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = iconColor
-                    )
-                }
-            } else {
-                // Non-PDF or Corrupted Fallback Icon
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(iconColor.copy(alpha = 0.08f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = iconVector,
-                        contentDescription = null,
-                        tint = iconColor,
-                        modifier = Modifier.size((width.value * 0.45f).dp)
-                    )
-                }
             }
+        }
 
-            // Tiny format chip on bottom-left corner
-            if (showFormatBadge) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(2.dp),
-                    shape = RoundedCornerShape(3.dp),
-                    color = iconColor.copy(alpha = 0.92f)
-                ) {
-                    Text(
-                        text = entity.documentType.name,
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 3.dp, vertical = 0.5.dp)
-                    )
-                }
+        // Tiny format chip on bottom-left corner
+        if (showFormatBadge) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(2.dp)
+                    .background(iconColor.copy(alpha = 0.92f), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 3.dp, vertical = 0.5.dp)
+            ) {
+                Text(
+                    text = entity.documentType.name,
+                    fontSize = 7.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
             }
+        }
 
-            // Lock badge if PIN locked
-            if (entity.isLocked) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(2.dp),
-                    shape = RoundedCornerShape(3.dp),
-                    color = Color(0xFFEA580C)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = "Protected",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .size(10.dp)
-                            .padding(1.dp)
-                    )
-                }
+        // Lock badge if PIN locked
+        if (entity.isLocked) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(2.dp)
+                    .background(Color(0xFFEA580C), RoundedCornerShape(3.dp))
+                    .padding(1.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Protected",
+                    tint = Color.White,
+                    modifier = Modifier.size(9.dp)
+                )
             }
         }
     }
@@ -316,68 +316,194 @@ fun DocumentQuickPreviewBottomSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Large First-Page Visual Preview
-            Surface(
+            // Large First-Page Visual Preview with Pinch-to-Zoom & Tap-to-Open
+            var previewScale by remember { androidx.compose.runtime.mutableFloatStateOf(1.0f) }
+            var previewOffset by remember { mutableStateOf(Offset.Zero) }
+
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth(0.72f)
-                    .widthIn(max = 320.dp)
-                    .height(260.dp)
-                    .shadow(8.dp, RoundedCornerShape(8.dp))
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(BorderStroke(1.dp, WhiteMixBorder), RoundedCornerShape(8.dp)),
-                color = Color.White,
-                shape = RoundedCornerShape(8.dp)
+                    .fillMaxWidth(0.85f)
+                    .widthIn(max = 340.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    if (previewBitmap != null) {
-                        Image(
-                            bitmap = previewBitmap!!.asImageBitmap(),
-                            contentDescription = "Cover preview",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit
-                        )
-                    } else if (isRenderingPreview) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(BorderStroke(1.dp, WhiteMixBorder), RoundedCornerShape(8.dp)),
+                    color = Color.White,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    BoxWithConstraints(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(previewScale) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val startTime = System.currentTimeMillis()
+                                    val startPos = down.position
+                                    var maxDistance = 0f
+                                    var isTransforming = false
+
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val pointerCount = event.changes.size
+
+                                        if (pointerCount >= 2) {
+                                            isTransforming = true
+                                            val zoomChange = event.calculateZoom()
+                                            val panChange = event.calculatePan()
+
+                                            val newScale = (previewScale * zoomChange).coerceIn(0.85f, 4.5f)
+                                            val maxPanX = if (newScale > 1f) (newScale - 1f) * size.width / 2f else 0f
+                                            val maxPanY = if (newScale > 1f) (newScale - 1f) * size.height / 2f else 0f
+
+                                            previewScale = newScale
+                                            previewOffset = Offset(
+                                                x = (previewOffset.x + panChange.x).coerceIn(-maxPanX, maxPanX),
+                                                y = (previewOffset.y + panChange.y).coerceIn(-maxPanY, maxPanY)
+                                            )
+                                            event.changes.forEach { it.consume() }
+                                        } else if (pointerCount == 1 && previewScale > 1.05f) {
+                                            val panChange = event.calculatePan()
+                                            if (panChange != Offset.Zero) {
+                                                isTransforming = true
+                                                val maxPanX = (previewScale - 1f) * size.width / 2f
+                                                val maxPanY = (previewScale - 1f) * size.height / 2f
+                                                previewOffset = Offset(
+                                                    x = (previewOffset.x + panChange.x).coerceIn(-maxPanX, maxPanX),
+                                                    y = (previewOffset.y + panChange.y).coerceIn(-maxPanY, maxPanY)
+                                                )
+                                                event.changes.forEach { it.consume() }
+                                            }
+                                        } else if (pointerCount == 1) {
+                                            val currentChange = event.changes.firstOrNull()
+                                            if (currentChange != null) {
+                                                val dist = (currentChange.position - startPos).getDistance()
+                                                if (dist > maxDistance) {
+                                                    maxDistance = dist
+                                                }
+                                            }
+                                        }
+                                    } while (event.changes.any { it.pressed })
+
+                                    val duration = System.currentTimeMillis() - startTime
+                                    // If not zoomed/pinched and short clean tap with minimal movement: open document directly!
+                                    if (!isTransforming && duration < 350 && maxDistance < 18f) {
+                                        onDismissRequest()
+                                        onOpenDocument(entity)
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer(
+                                    scaleX = previewScale,
+                                    scaleY = previewScale,
+                                    translationX = previewOffset.x,
+                                    translationY = previewOffset.y
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
-                            CircularProgressIndicator(
-                                color = BrandCrimson,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(32.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Rendering Page 1 Preview...",
-                                fontSize = 11.sp,
-                                color = TextSecondary
-                            )
+                            if (previewBitmap != null) {
+                                Image(
+                                    bitmap = previewBitmap!!.asImageBitmap(),
+                                    contentDescription = "Cover preview",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Fit
+                                )
+                            } else if (isRenderingPreview) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = BrandCrimson,
+                                        strokeWidth = 2.5.dp,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Rendering Page 1 Preview...",
+                                        fontSize = 11.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            } else {
+                                // Icon fallback
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = when (entity.documentType) {
+                                            DocumentType.PDF -> Icons.Default.PictureAsPdf
+                                            DocumentType.WORD -> Icons.Default.Description
+                                            DocumentType.EXCEL -> Icons.Default.TableChart
+                                            else -> Icons.Default.Description
+                                        },
+                                        contentDescription = null,
+                                        tint = iconColor,
+                                        modifier = Modifier.size(54.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "${entity.documentType.name} Document",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary
+                                    )
+                                }
+                            }
                         }
-                    } else {
-                        // Icon fallback
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(16.dp)
-                        ) {
-                            Icon(
-                                imageVector = when (entity.documentType) {
-                                    DocumentType.PDF -> Icons.Default.PictureAsPdf
-                                    DocumentType.WORD -> Icons.Default.Description
-                                    DocumentType.EXCEL -> Icons.Default.TableChart
-                                    else -> Icons.Default.Description
-                                },
-                                contentDescription = null,
-                                tint = iconColor,
-                                modifier = Modifier.size(54.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "${entity.documentType.name} Document",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
+
+                        // Floating Zoom Indicator & Reset Badge or Pinch/Tap hint
+                        if (previewScale > 1.05f || previewScale < 0.95f) {
+                            Surface(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(8.dp)
+                                    .clickable {
+                                        previewScale = 1.0f
+                                        previewOffset = Offset.Zero
+                                    },
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.Black.copy(alpha = 0.75f)
+                            ) {
+                                Text(
+                                    text = "${(previewScale * 100).roundToInt()}% • Tap to Reset",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        } else {
+                            Surface(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 6.dp)
+                                    .clickable {
+                                        onDismissRequest()
+                                        onOpenDocument(entity)
+                                    },
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.Black.copy(alpha = 0.6f)
+                            ) {
+                                Text(
+                                    text = "🔍 Pinch to Zoom • Tap to Open",
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
                         }
                     }
                 }

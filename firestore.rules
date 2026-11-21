@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidCloudDocument(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             data.userId.size() >= 1 &&
+             data.userId.size() <= 128 &&
+             data.title is string &&
+             data.title.size() >= 1 &&
+             data.title.size() <= 255 &&
+             data.documentType is string &&
+             data.documentType in ['PDF', 'WORD', 'EXCEL', 'OTHER'] &&
+             data.sizeBytes is int &&
+             data.sizeBytes >= 0 &&
+             data.contentHash is string &&
+             data.contentHash.size() >= 1 &&
+             data.contentHash.size() <= 128 &&
+             data.storagePath is string &&
+             data.storagePath.size() >= 1 &&
+             data.storagePath.size() <= 512 &&
+             data.syncState is string &&
+             data.syncState in ['SYNCED', 'METADATA_ONLY', 'ERROR'] &&
+             (!('localPath' in data) || (data.localPath is string && data.localPath.size() <= 1024)) &&
+             (!('folderName' in data) || (data.folderName is string && data.folderName.size() <= 128));
+    }
+
+    match /users/{userId}/cloud_documents/{docId} {
+      allow get: if isOwner(userId) && isValidId(docId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(docId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'title', 'documentType', 'sizeBytes',
+                         'contentHash', 'storagePath', 'syncState',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'title', 'documentType', 'sizeBytes',
+                         'contentHash', 'storagePath', 'syncState',
+                         'localPath', 'folderName', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp &&
+                       incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp &&
+                       incoming().updatedAt <= request.time &&
+                       isValidCloudDocument(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(docId) &&
+                       isValidCloudDocument(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp &&
+                       incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'documentType', 'sizeBytes', 'contentHash',
+                         'storagePath', 'syncState', 'localPath', 'folderName', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(docId);
+    }
+
+    // Public read-only release metadata for direct APK update checks; admin-managed only
+    match /app_config/latest_release {
+      allow get: if true;
+      allow list, create, update, delete: if false;
+    }
+  }
+}

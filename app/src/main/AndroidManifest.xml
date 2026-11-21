@@ -12,6 +12,7 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Remove unused Privacy Sandbox measurement permission to prevent onNullBinding MEASUREMENT_SERVICE error -->
     <uses-permission

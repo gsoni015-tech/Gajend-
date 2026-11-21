@@ -21,6 +21,7 @@ val BrandOnPrimaryContainer = Color(0xFF1E40AF)
 val BrandCrimson = Color(0xFFDC2626)
 val BrandCrimsonContainer = Color(0xFFFEF2F2)
 val BrandOnCrimsonContainer = Color(0xFF991B1B)
+val BrandEmerald = Color(0xFF059669)
 
 val AdBadgeAmber = Color(0xFFD97706)
 val AdBadgeAmberContainer = Color(0xFFFEF3C7)

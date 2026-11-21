@@ -24,6 +24,9 @@ interface PdfDao {
     @Query("SELECT path FROM pdf_files")
     suspend fun getAllPaths(): List<String>
 
+    @Query("SELECT * FROM pdf_files ORDER BY lastModifiedTimestamp DESC")
+    suspend fun getAllPdfsList(): List<PdfEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPdf(pdf: PdfEntity)
 
@@ -39,6 +42,9 @@ interface PdfDao {
     @Query("UPDATE pdf_files SET lastOpenedTimestamp = :timestamp WHERE path = :path")
     suspend fun updateLastOpened(path: String, timestamp: Long)
 
+    @Query("UPDATE pdf_files SET lastOpenedTimestamp = 0 WHERE lastOpenedTimestamp > 0")
+    suspend fun clearAllRecentHistory()
+
     @Query("UPDATE pdf_files SET isLocked = :isLocked, password = :password WHERE path = :path")
     suspend fun updateLock(path: String, isLocked: Boolean, password: String)
 
@@ -47,6 +53,9 @@ interface PdfDao {
 
     @Query("DELETE FROM pdf_files WHERE path = :path")
     suspend fun deletePdf(path: String)
+
+    @Query("DELETE FROM pdf_files WHERE path IN (:paths)")
+    suspend fun deletePdfsByPaths(paths: List<String>)
 
     // Bookmarks
     @Query("SELECT * FROM pdf_bookmarks WHERE pdfPath = :pdfPath ORDER BY pageNumber ASC")

@@ -1,5 +1,6 @@
 package com.example.data.local
 
+import androidx.compose.runtime.Immutable
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -7,6 +8,7 @@ enum class DocumentType {
     PDF, WORD, EXCEL, OTHER
 }
 
+@Immutable
 @Entity(tableName = "pdf_files")
 data class PdfEntity(
     @PrimaryKey
@@ -34,6 +36,7 @@ data class PdfEntity(
         }
 }
 
+@Immutable
 @Entity(tableName = "pdf_bookmarks")
 data class BookmarkEntity(
     @PrimaryKey(autoGenerate = true)

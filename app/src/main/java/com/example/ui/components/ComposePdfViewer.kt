@@ -4,11 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
-import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDecay
+import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -20,30 +21,39 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -62,17 +72,24 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.pdf.render.PdfRenderEngine
 import com.example.ui.viewmodel.ReaderThemeMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 enum class PdfViewerScrollMode {
@@ -103,7 +120,7 @@ fun ComposePdfViewer(
     showThumbnailBottomSheet: Boolean = false,
     showThumbnailDrawer: Boolean = false,
     showThumbnailStrip: Boolean = false,
-    isPageLocked: Boolean = true,
+    isPageLocked: Boolean = false,
     onCloseThumbnailBottomSheet: () -> Unit = {},
     onCloseThumbnailDrawer: () -> Unit = {},
     onCloseThumbnailStrip: () -> Unit = {},
@@ -295,67 +312,232 @@ fun ComposePdfViewer(
     }
 }
 
+internal data class VerticalPanScrollResult(
+    val newOffsetY: Float,
+    val leftoverPanDeltaY: Float
+)
+
+internal object PdfZoomMath {
+    const val DEFAULT_MIN_SCALE = 1.0f
+    const val DEFAULT_MAX_SCALE = 4.0f
+    const val DEFAULT_DOUBLE_TAP_SCALE = 2.5f
+    const val PINCH_ELASTIC_MIN_RATIO = 0.90f
+    const val PINCH_ELASTIC_MAX_RATIO = 1.08f
+    const val ZOOM_ACTIVE_EPSILON = 0.02f
+
+    fun clampScaleResting(
+        scale: Float,
+        minScale: Float = DEFAULT_MIN_SCALE,
+        maxScale: Float = DEFAULT_MAX_SCALE
+    ): Float = scale.coerceIn(minScale, maxScale)
+
+    fun clampScaleDuringPinch(
+        scale: Float,
+        minScale: Float = DEFAULT_MIN_SCALE,
+        maxScale: Float = DEFAULT_MAX_SCALE
+    ): Float = scale.coerceIn(minScale * PINCH_ELASTIC_MIN_RATIO, maxScale * PINCH_ELASTIC_MAX_RATIO)
+
+    fun maxPanOffset(scale: Float, viewportSpan: Float): Float =
+        (((scale - 1f).coerceAtLeast(0f)) * viewportSpan.coerceAtLeast(1f)) / 2f
+
+    fun clampOffsets(
+        scale: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+        rawX: Float,
+        rawY: Float,
+        isPageLocked: Boolean = false
+    ): Pair<Float, Float> {
+        if (scale <= 1.0f) {
+            return 0f to 0f
+        }
+        val maxY = maxPanOffset(scale, viewHeight)
+        if (isPageLocked || scale <= 1.0f + ZOOM_ACTIVE_EPSILON) {
+            return 0f to rawY.coerceIn(-maxY, maxY)
+        }
+        val maxX = maxPanOffset(scale, viewWidth)
+        return rawX.coerceIn(-maxX, maxX) to rawY.coerceIn(-maxY, maxY)
+    }
+
+    fun computePinchFocalOffsets(
+        oldScale: Float,
+        newScale: Float,
+        oldX: Float,
+        oldY: Float,
+        prevCentroidX: Float,
+        prevCentroidY: Float,
+        currCentroidX: Float,
+        currCentroidY: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+        isPageLocked: Boolean = false
+    ): Pair<Float, Float> {
+        if (newScale <= 1.0f || oldScale <= 0f) {
+            return 0f to 0f
+        }
+        val halfW = viewWidth / 2f
+        val halfH = viewHeight / 2f
+        val cPrevX = prevCentroidX - halfW
+        val cPrevY = prevCentroidY - halfH
+        val cCurrX = currCentroidX - halfW
+        val cCurrY = currCentroidY - halfH
+        val ratio = newScale / oldScale
+        val rawX = if (isPageLocked) 0f else cCurrX - (cPrevX - oldX) * ratio
+        val rawY = cCurrY - (cPrevY - oldY) * ratio
+        return clampOffsets(newScale, viewWidth, viewHeight, rawX, rawY, isPageLocked)
+    }
+
+    fun computeDoubleTapTargetOffsets(
+        targetScale: Float,
+        tapX: Float,
+        tapY: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+        isPageLocked: Boolean = false
+    ): Pair<Float, Float> {
+        if (targetScale <= 1.0f) return 0f to 0f
+        val pX = tapX - viewWidth / 2f
+        val pY = tapY - viewHeight / 2f
+        val rawX = if (isPageLocked) 0f else pX * (1f - targetScale)
+        val rawY = pY * (1f - targetScale)
+        return clampOffsets(targetScale, viewWidth, viewHeight, rawX, rawY, isPageLocked)
+    }
+
+    fun splitVerticalPanAndScroll(
+        currentOffsetY: Float,
+        panDeltaY: Float,
+        maxY: Float
+    ): VerticalPanScrollResult {
+        val clampedMaxY = maxY.coerceAtLeast(0f)
+        val targetOffsetY = currentOffsetY + panDeltaY
+        val clampedOffsetY = targetOffsetY.coerceIn(-clampedMaxY, clampedMaxY)
+        val absorbedY = clampedOffsetY - currentOffsetY
+        val leftoverY = panDeltaY - absorbedY
+        return VerticalPanScrollResult(clampedOffsetY, leftoverY)
+    }
+}
+
 /**
  * SmoothZoomableBox provides:
- * 1. Multi-touch smooth pinch-to-zoom with continuous focal point tracking.
- * 2. Instant double-tap to zoom in (2.5x) centered directly on the tapped area.
- * 3. Instant double-tap to zoom out (1.0x) back to fit-to-screen with smooth animation.
- * 4. Panning when zoomed in, with boundary clamping so content never floats away.
- * 5. Full native passthrough when scale is 1.0x so lists and pagers scroll at 120Hz.
- * 6. Floating "Tap to Reset" badge when magnified for quick 1-tap overview.
+ * 1. Multi-touch smooth pinch-to-zoom (1.0x minScale fit-to-width up to 4.0x maxScale) with
+ *    exact center-relative focal point tracking and subtle elastic pinch bounce back to 1.0x.
+ * 2. Instant double-tap to zoom in (2.5x) centered directly on the tapped area, or zoom out (1.0x).
+ * 3. Full panning + seamless continuous vertical page scroll delegation when zoomed in so users
+ *    can navigate across all previous/next pages without zooming back out.
+ * 4. Optional horizontal edge-swipe delegation for paged horizontal viewers when zoomed in.
+ * 5. Full native passthrough at 1.0x so lists and pagers scroll at 120Hz.
+ * 6. Floating "Tap to Reset" badge when magnified.
  */
 @Composable
 fun SmoothZoomableBox(
     modifier: Modifier = Modifier,
-    minScale: Float = 1.0f,
-    maxScale: Float = 4.0f,
-    doubleTapScale: Float = 2.5f,
-    isPageLocked: Boolean = true,
+    minScale: Float = PdfZoomMath.DEFAULT_MIN_SCALE,
+    maxScale: Float = PdfZoomMath.DEFAULT_MAX_SCALE,
+    doubleTapScale: Float = PdfZoomMath.DEFAULT_DOUBLE_TAP_SCALE,
+    isPageLocked: Boolean = false,
     onLongPress: (() -> Unit)? = null,
+    onScrollVerticalDelta: ((rawDeltaPx: Float) -> Float)? = null,
+    onHorizontalEdgeSwipe: ((direction: Int) -> Boolean)? = null,
     content: @Composable BoxScope.(currentScale: Float) -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val scaleAnim = remember { Animatable(1.0f) }
-    val offsetXAnim = remember { Animatable(0f) }
-    val offsetYAnim = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val effectiveMinScale = minScale.coerceAtLeast(1.0f)
+    val effectiveMaxScale = maxScale.coerceAtLeast(effectiveMinScale)
+    val effectiveDoubleTapScale = doubleTapScale.coerceIn(effectiveMinScale, effectiveMaxScale)
+    val doubleTapSlopPx = remember(density) { with(density) { 48.dp.toPx() } }
+    val edgeSwipeThresholdPx = remember(density) { with(density) { 44.dp.toPx() } }
 
-    LaunchedEffect(isPageLocked) {
-        if (isPageLocked) {
-            coroutineScope.launch {
-                offsetXAnim.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+    var scaleState by remember { mutableFloatStateOf(effectiveMinScale) }
+    var offsetXState by remember { mutableFloatStateOf(0f) }
+    var offsetYState by remember { mutableFloatStateOf(0f) }
+    var activeAnimJob by remember { mutableStateOf<Job?>(null) }
+
+    val isZoomed by remember(effectiveMinScale) {
+        derivedStateOf { scaleState > effectiveMinScale + 0.04f }
+    }
+
+    fun animateScaleAndOffsets(
+        targetScale: Float,
+        targetX: Float,
+        targetY: Float,
+        useTween: Boolean = false
+    ) {
+        activeAnimJob?.cancel()
+        val startScale = scaleState
+        val startX = offsetXState
+        val startY = offsetYState
+        activeAnimJob = coroutineScope.launch {
+            val anim = androidx.compose.animation.core.Animatable(0f)
+            anim.animateTo(
+                targetValue = 1f,
+                animationSpec = if (useTween) {
+                    tween(240, easing = FastOutSlowInEasing)
+                } else {
+                    spring(stiffness = Spring.StiffnessMediumLow)
+                }
+            ) {
+                val fraction = value
+                scaleState = startScale + (targetScale - startScale) * fraction
+                offsetXState = startX + (targetX - startX) * fraction
+                offsetYState = startY + (targetY - startY) * fraction
             }
+            scaleState = targetScale
+            offsetXState = targetX
+            offsetYState = targetY
         }
     }
 
-    BoxWithConstraints(modifier = modifier) {
+    LaunchedEffect(isPageLocked) {
+        if (isPageLocked && offsetXState != 0f) {
+            animateScaleAndOffsets(
+                targetScale = PdfZoomMath.clampScaleResting(scaleState, effectiveMinScale, effectiveMaxScale),
+                targetX = 0f,
+                targetY = offsetYState
+            )
+        }
+    }
+
+    BoxWithConstraints(modifier = modifier.testTag("pdf_zoomable_container")) {
         val viewWidth = constraints.maxWidth.toFloat().coerceAtLeast(1f)
         val viewHeight = constraints.maxHeight.toFloat().coerceAtLeast(1f)
 
-        fun clampOffsets(targetScale: Float, rawX: Float, rawY: Float): Pair<Float, Float> {
-            val maxY = ((targetScale - 1f).coerceAtLeast(0f) * viewHeight) / 2f
-            if (isPageLocked || targetScale <= 1.05f) {
-                // When Page Locked: strictly lock horizontal offset to 0f! Page CANNOT move left or right!
-                return Pair(0f, rawY.coerceIn(-maxY, maxY))
+        fun applyVerticalPanAndScroll(panDeltaY: Float): Boolean {
+            val currentScale = scaleState.coerceAtLeast(1.0f)
+            val maxY = PdfZoomMath.maxPanOffset(currentScale, viewHeight)
+            val split = PdfZoomMath.splitVerticalPanAndScroll(offsetYState, panDeltaY, maxY)
+            offsetYState = split.newOffsetY
+            val absorbedByOffset = abs(split.leftoverPanDeltaY - panDeltaY) > 0.01f
+            var consumedByList = 0f
+            if (abs(split.leftoverPanDeltaY) > 0.01f && onScrollVerticalDelta != null) {
+                // Dragging finger UP (leftoverPanDeltaY < 0) scrolls LazyColumn forward (+delta)
+                val scrollRequest = -split.leftoverPanDeltaY / currentScale
+                consumedByList = onScrollVerticalDelta.invoke(scrollRequest)
             }
-            val maxX = ((targetScale - 1f).coerceAtLeast(0f) * viewWidth) / 2f
-            return Pair(rawX.coerceIn(-maxX, maxX), rawY.coerceIn(-maxY, maxY))
+            return absorbedByOffset || abs(consumedByList) > 0.01f
         }
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(viewWidth, viewHeight, isPageLocked) {
+                .pointerInput(viewWidth, viewHeight, isPageLocked, effectiveMinScale, effectiveMaxScale) {
                     var lastTapTime = 0L
                     var lastTapPosition = Offset.Zero
                     val doubleTapTimeout = 320L
-                    val doubleTapSlop = 60f
 
                     awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val downTime = SystemClock.uptimeMillis()
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial
+                        )
+                        activeAnimJob?.cancel()
+                        val downTime = down.uptimeMillis
+                        var releaseTime = downTime
                         val downPosition = down.position
                         var isMultiTouch = false
                         var hasMoved = false
+                        var horizontalEdgeOverscroll = 0f
+                        val velocityTracker = VelocityTracker()
 
                         val longPressJob = onLongPress?.let { callback ->
                             coroutineScope.launch {
@@ -370,7 +552,8 @@ fun SmoothZoomableBox(
                         var prevCentroid = Offset.Zero
 
                         do {
-                            val event = awaitPointerEvent()
+                            val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                            releaseTime = event.changes.maxOfOrNull { it.uptimeMillis } ?: releaseTime
                             val pointers = event.changes.filter { it.pressed }
                             val pointerCount = pointers.size
 
@@ -382,20 +565,30 @@ fun SmoothZoomableBox(
                                 val currentDist = (p0 - p1).getDistance()
                                 val currentCentroid = Offset((p0.x + p1.x) / 2f, (p0.y + p1.y) / 2f)
 
-                                if (prevDist > 0f) {
+                                if (prevDist > 1f && currentDist > 1f) {
                                     val zoomFactor = currentDist / prevDist
-                                    val panDelta = currentCentroid - prevCentroid
-
-                                    val oldScale = scaleAnim.value
-                                    val newScale = (oldScale * zoomFactor).coerceIn(0.75f, 5.0f)
-                                    val rawX = if (isPageLocked) 0f else (currentCentroid.x - (currentCentroid.x - offsetXAnim.value) * zoomFactor + panDelta.x)
-                                    val rawY = currentCentroid.y - (currentCentroid.y - offsetYAnim.value) * zoomFactor + panDelta.y
-                                    val (clampedX, clampedY) = clampOffsets(newScale, rawX, rawY)
-
-                                    coroutineScope.launch { scaleAnim.snapTo(newScale) }
-                                    coroutineScope.launch { offsetXAnim.snapTo(clampedX) }
-                                    coroutineScope.launch { offsetYAnim.snapTo(clampedY) }
-
+                                    val oldScale = scaleState
+                                    val newScale = PdfZoomMath.clampScaleDuringPinch(
+                                        oldScale * zoomFactor,
+                                        effectiveMinScale,
+                                        effectiveMaxScale
+                                    )
+                                    val (clampedX, clampedY) = PdfZoomMath.computePinchFocalOffsets(
+                                        oldScale = oldScale,
+                                        newScale = newScale,
+                                        oldX = offsetXState,
+                                        oldY = offsetYState,
+                                        prevCentroidX = prevCentroid.x,
+                                        prevCentroidY = prevCentroid.y,
+                                        currCentroidX = currentCentroid.x,
+                                        currCentroidY = currentCentroid.y,
+                                        viewWidth = viewWidth,
+                                        viewHeight = viewHeight,
+                                        isPageLocked = isPageLocked
+                                    )
+                                    scaleState = newScale
+                                    offsetXState = clampedX
+                                    offsetYState = clampedY
                                     event.changes.forEach { it.consume() }
                                 }
                                 prevDist = currentDist
@@ -405,109 +598,149 @@ fun SmoothZoomableBox(
                                 if (!isMultiTouch) {
                                     val p = pointers[0]
                                     val distFromDown = (p.position - downPosition).getDistance()
-                                    if (distFromDown > 12f) {
+                                    if (!hasMoved && distFromDown > viewConfiguration.touchSlop) {
                                         hasMoved = true
                                         longPressJob?.cancel()
                                     }
 
-                                    // When zoomed in, pan around the magnified document
-                                    if (scaleAnim.value > 1.05f) {
+                                    // When zoomed in above 1.0x, coordinate X pan + Y pan/page scrolling
+                                    if (hasMoved && scaleState > effectiveMinScale + PdfZoomMath.ZOOM_ACTIVE_EPSILON) {
+                                        velocityTracker.addPosition(p.uptimeMillis, p.position)
                                         val panDelta = p.position - p.previousPosition
-                                        val rawX = if (isPageLocked) 0f else (offsetXAnim.value + panDelta.x)
-                                        val rawY = offsetYAnim.value + panDelta.y
-                                        val (clampedX, clampedY) = clampOffsets(
-                                            scaleAnim.value,
-                                            rawX,
-                                            rawY
-                                        )
-                                        coroutineScope.launch { offsetXAnim.snapTo(clampedX) }
-                                        coroutineScope.launch { offsetYAnim.snapTo(clampedY) }
+
+                                        if (!isPageLocked) {
+                                            val maxX = PdfZoomMath.maxPanOffset(scaleState, viewWidth)
+                                            val nextX = offsetXState + panDelta.x
+                                            val clampedX = nextX.coerceIn(-maxX, maxX)
+                                            val leftoverX = nextX - clampedX
+                                            offsetXState = clampedX
+
+                                            if (onHorizontalEdgeSwipe != null && abs(panDelta.x) > abs(panDelta.y) && abs(leftoverX) > 0.1f) {
+                                                horizontalEdgeOverscroll += leftoverX
+                                            } else if (abs(panDelta.y) > abs(panDelta.x) * 1.5f) {
+                                                horizontalEdgeOverscroll = 0f
+                                            }
+                                        } else {
+                                            offsetXState = 0f
+                                        }
+
+                                        applyVerticalPanAndScroll(panDelta.y)
                                         p.consume()
                                     }
-                                    // When scale <= 1.05f, we do NOT consume, allowing natural scrolling!
                                 }
                             }
                         } while (event.changes.any { it.pressed })
 
                         longPressJob?.cancel()
 
-                        val releaseTime = SystemClock.uptimeMillis()
-
-                        // Double tap detection
                         if (!isMultiTouch && !hasMoved && (releaseTime - downTime < 280L)) {
                             val timeSinceLast = releaseTime - lastTapTime
                             val distFromLast = (downPosition - lastTapPosition).getDistance()
 
-                            if (timeSinceLast in 30L..doubleTapTimeout && distFromLast < doubleTapSlop) {
-                                // DOUBLE TAP TRIGGERED!
+                            if (lastTapTime > 0L && timeSinceLast in 0L..doubleTapTimeout && distFromLast < doubleTapSlopPx) {
                                 lastTapTime = 0L
-                                if (scaleAnim.value > 1.15f) {
-                                    // Smooth Animated Zoom Out
-                                    coroutineScope.launch {
-                                        scaleAnim.animateTo(1.0f, tween(280, easing = FastOutSlowInEasing))
-                                    }
-                                    coroutineScope.launch {
-                                        offsetXAnim.animateTo(0f, tween(280, easing = FastOutSlowInEasing))
-                                    }
-                                    coroutineScope.launch {
-                                        offsetYAnim.animateTo(0f, tween(280, easing = FastOutSlowInEasing))
-                                    }
-                                } else {
-                                    // Smooth Animated Zoom In centered on tapped coordinates
-                                    val targetScale = doubleTapScale
-                                    val rawTargetX = if (isPageLocked) 0f else ((viewWidth / 2f - downPosition.x) * targetScale)
-                                    val (targetX, targetY) = clampOffsets(
-                                        targetScale,
-                                        rawTargetX,
-                                        (viewHeight / 2f - downPosition.y) * targetScale
+                                if (scaleState > effectiveMinScale + 0.06f) {
+                                    animateScaleAndOffsets(
+                                        targetScale = effectiveMinScale,
+                                        targetX = 0f,
+                                        targetY = 0f,
+                                        useTween = true
                                     )
-                                    coroutineScope.launch {
-                                        scaleAnim.animateTo(targetScale, tween(280, easing = FastOutSlowInEasing))
-                                    }
-                                    coroutineScope.launch {
-                                        offsetXAnim.animateTo(targetX, tween(280, easing = FastOutSlowInEasing))
-                                    }
-                                    coroutineScope.launch {
-                                        offsetYAnim.animateTo(targetY, tween(280, easing = FastOutSlowInEasing))
-                                    }
+                                } else {
+                                    val (targetX, targetY) = PdfZoomMath.computeDoubleTapTargetOffsets(
+                                        targetScale = effectiveDoubleTapScale,
+                                        tapX = downPosition.x,
+                                        tapY = downPosition.y,
+                                        viewWidth = viewWidth,
+                                        viewHeight = viewHeight,
+                                        isPageLocked = isPageLocked
+                                    )
+                                    animateScaleAndOffsets(
+                                        targetScale = effectiveDoubleTapScale,
+                                        targetX = targetX,
+                                        targetY = targetY,
+                                        useTween = true
+                                    )
                                 }
                             } else {
                                 lastTapTime = releaseTime
                                 lastTapPosition = downPosition
                             }
                         } else {
-                            // Touch released after pinch or drag - spring back to legal boundaries
-                            if (scaleAnim.value < minScale) {
-                                coroutineScope.launch {
-                                    scaleAnim.animateTo(minScale, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
-                                coroutineScope.launch {
-                                    offsetXAnim.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
-                                coroutineScope.launch {
-                                    offsetYAnim.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
-                            } else if (scaleAnim.value > maxScale) {
-                                coroutineScope.launch {
-                                    scaleAnim.animateTo(maxScale, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
-                                val (cx, cy) = clampOffsets(maxScale, offsetXAnim.value, offsetYAnim.value)
-                                coroutineScope.launch {
-                                    offsetXAnim.animateTo(cx, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
-                                coroutineScope.launch {
-                                    offsetYAnim.animateTo(cy, spring(stiffness = Spring.StiffnessMediumLow))
-                                }
+                            val restingScale = PdfZoomMath.clampScaleResting(
+                                scaleState,
+                                effectiveMinScale,
+                                effectiveMaxScale
+                            )
+                            if (scaleState < effectiveMinScale) {
+                                animateScaleAndOffsets(effectiveMinScale, 0f, 0f)
+                            } else if (scaleState > effectiveMaxScale) {
+                                val (cx, cy) = PdfZoomMath.clampOffsets(
+                                    restingScale,
+                                    viewWidth,
+                                    viewHeight,
+                                    offsetXState,
+                                    offsetYState,
+                                    isPageLocked
+                                )
+                                animateScaleAndOffsets(restingScale, cx, cy)
                             } else {
-                                val (cx, cy) = clampOffsets(scaleAnim.value, offsetXAnim.value, offsetYAnim.value)
-                                if (cx != offsetXAnim.value || isPageLocked) {
-                                    coroutineScope.launch {
-                                        offsetXAnim.animateTo(if (isPageLocked) 0f else cx, spring(stiffness = Spring.StiffnessMediumLow))
-                                    }
+                                val (cx, cy) = PdfZoomMath.clampOffsets(
+                                    scaleState,
+                                    viewWidth,
+                                    viewHeight,
+                                    offsetXState,
+                                    offsetYState,
+                                    isPageLocked
+                                )
+                                if (cx != offsetXState || cy != offsetYState) {
+                                    offsetXState = cx
+                                    offsetYState = cy
                                 }
-                                if (cy != offsetYAnim.value) {
-                                    coroutineScope.launch {
-                                        offsetYAnim.animateTo(cy, spring(stiffness = Spring.StiffnessMediumLow))
+
+                                val switchedPage = if (
+                                    !isMultiTouch &&
+                                    onHorizontalEdgeSwipe != null &&
+                                    abs(horizontalEdgeOverscroll) > edgeSwipeThresholdPx
+                                ) {
+                                    // Swiping left (overscroll < 0) goes forward (+1); swiping right goes back (-1)
+                                    val direction = if (horizontalEdgeOverscroll < 0f) 1 else -1
+                                    val turned = onHorizontalEdgeSwipe.invoke(direction)
+                                    if (turned) {
+                                        val edgeX = PdfZoomMath.maxPanOffset(scaleState, viewWidth)
+                                        val targetEdgeX = if (direction > 0) edgeX else -edgeX
+                                        animateScaleAndOffsets(scaleState, targetEdgeX, offsetYState, useTween = true)
+                                    }
+                                    turned
+                                } else {
+                                    false
+                                }
+
+                                if (
+                                    !switchedPage &&
+                                    !isMultiTouch &&
+                                    hasMoved &&
+                                    scaleState > effectiveMinScale + PdfZoomMath.ZOOM_ACTIVE_EPSILON &&
+                                    onScrollVerticalDelta != null
+                                ) {
+                                    val vy = velocityTracker.calculateVelocity().y
+                                    if (abs(vy) > 150f) {
+                                        activeAnimJob = coroutineScope.launch {
+                                            var prevVal = 0f
+                                            AnimationState(
+                                                initialValue = 0f,
+                                                initialVelocity = vy
+                                            ).animateDecay(
+                                                animationSpec = exponentialDecay(frictionMultiplier = 1.6f)
+                                            ) {
+                                                val delta = value - prevVal
+                                                prevVal = value
+                                                val moved = applyVerticalPanAndScroll(delta)
+                                                if (!moved) {
+                                                    cancelAnimation()
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -515,45 +748,44 @@ fun SmoothZoomableBox(
                     }
                 }
                 .graphicsLayer {
-                    scaleX = scaleAnim.value
-                    scaleY = scaleAnim.value
-                    translationX = if (isPageLocked) 0f else offsetXAnim.value
-                    translationY = offsetYAnim.value
+                    scaleX = scaleState
+                    scaleY = scaleState
+                    translationX = if (isPageLocked) 0f else offsetXState
+                    translationY = offsetYState
                     clip = true
                 }
         ) {
-            content(scaleAnim.value)
+            content(scaleState)
         }
 
         // Quick 1-Tap Reset Zoom Badge when Magnified
-        if (scaleAnim.value > 1.15f) {
-            val roundedScale = (scaleAnim.value * 10).roundToInt() / 10f
+        if (isZoomed) {
+            val percentage = (scaleState * 100).roundToInt()
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 16.dp, end = 16.dp)
-                    .clip(RoundedCornerShape(16.dp))
+                    .padding(top = 12.dp, end = 12.dp)
+                    .minimumInteractiveComponentSize()
+                    .clip(RoundedCornerShape(18.dp))
+                    .testTag("pdf_reset_zoom_badge")
                     .clickable {
-                        coroutineScope.launch {
-                            scaleAnim.animateTo(1.0f, tween(250, easing = FastOutSlowInEasing))
-                        }
-                        coroutineScope.launch {
-                            offsetXAnim.animateTo(0f, tween(250, easing = FastOutSlowInEasing))
-                        }
-                        coroutineScope.launch {
-                            offsetYAnim.animateTo(0f, tween(250, easing = FastOutSlowInEasing))
-                        }
+                        animateScaleAndOffsets(
+                            targetScale = effectiveMinScale,
+                            targetX = 0f,
+                            targetY = 0f,
+                            useTween = true
+                        )
                     },
-                shape = RoundedCornerShape(16.dp),
-                color = Color.Black.copy(alpha = 0.8f),
+                shape = RoundedCornerShape(18.dp),
+                color = Color.Black.copy(alpha = 0.82f),
                 shadowElevation = 4.dp
             ) {
                 Text(
-                    text = "${roundedScale}x • Tap to Reset",
+                    text = "$percentage% • Reset",
                     color = Color.White,
                     fontSize = 11.sp,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
                 )
             }
         }
@@ -566,12 +798,13 @@ private fun ContinuousVerticalViewer(
     pageCount: Int,
     colorFilter: ColorFilter?,
     targetPage: Int? = null,
-    isPageLocked: Boolean = true,
+    isPageLocked: Boolean = false,
     onPageLongPress: (Int) -> Unit = {},
     onPagePillClick: () -> Unit = {},
     onPageChanged: (Int, Int) -> Unit
 ) {
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(targetPage) {
         if (targetPage != null && targetPage in 1..pageCount) {
@@ -592,47 +825,60 @@ private fun ContinuousVerticalViewer(
             }
     }
 
-    SmoothZoomableBox(
-        modifier = Modifier.fillMaxSize(),
-        doubleTapScale = 2.5f,
-        isPageLocked = isPageLocked,
-        onLongPress = { onPageLongPress(displayPageNumber) }
-    ) {
-        LazyColumn(
-            state = listState,
+    Box(modifier = Modifier.fillMaxSize()) {
+        SmoothZoomableBox(
             modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            contentPadding = PaddingValues(vertical = 8.dp)
+            minScale = PdfZoomMath.DEFAULT_MIN_SCALE,
+            maxScale = PdfZoomMath.DEFAULT_MAX_SCALE,
+            doubleTapScale = PdfZoomMath.DEFAULT_DOUBLE_TAP_SCALE,
+            isPageLocked = isPageLocked,
+            onLongPress = { onPageLongPress(displayPageNumber) },
+            onScrollVerticalDelta = { rawDeltaPx ->
+                listState.dispatchRawDelta(rawDeltaPx)
+            }
         ) {
-            items(pageCount, key = { it }) { index ->
-                PdfPageItem(
-                    renderEngine = renderEngine,
-                    pageIndex = index,
-                    colorFilter = colorFilter
-                )
-                Spacer(modifier = Modifier.height(8.dp))
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("pdf_continuous_list"),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                contentPadding = PaddingValues(top = 8.dp, bottom = 68.dp)
+            ) {
+                items(pageCount, key = { it }) { index ->
+                    PdfPageItem(
+                        renderEngine = renderEngine,
+                        pageIndex = index,
+                        colorFilter = colorFilter
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
             }
         }
 
-        // Floating Page Indicator Pill
-        Surface(
+        // Fixed unscaled floating Page Navigation Pill at bottom center
+        PdfPageNavigationPill(
+            currentPage = displayPageNumber,
+            pageCount = pageCount,
+            onPrevPage = {
+                if (displayPageNumber > 1) {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem((displayPageNumber - 2).coerceAtLeast(0))
+                    }
+                }
+            },
+            onNextPage = {
+                if (displayPageNumber < pageCount) {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(displayPageNumber.coerceAtMost(pageCount - 1))
+                    }
+                }
+            },
+            onPillClick = onPagePillClick,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 14.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .clickable(onClick = onPagePillClick),
-            shape = RoundedCornerShape(20.dp),
-            color = Color.Black.copy(alpha = 0.8f),
-            shadowElevation = 4.dp
-        ) {
-            Text(
-                text = if (isPageLocked) "Page $displayPageNumber of $pageCount • 🔒 Locked" else "Page $displayPageNumber of $pageCount • Tap to Jump",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-            )
-        }
+                .padding(bottom = 12.dp)
+        )
     }
 }
 
@@ -642,12 +888,13 @@ private fun PagedHorizontalViewer(
     pageCount: Int,
     colorFilter: ColorFilter?,
     targetPage: Int? = null,
-    isPageLocked: Boolean = true,
+    isPageLocked: Boolean = false,
     onPageLongPress: (Int) -> Unit = {},
     onPagePillClick: () -> Unit = {},
     onPageChanged: (Int, Int) -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { pageCount })
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(targetPage) {
         if (targetPage != null && targetPage in 1..pageCount) {
@@ -664,49 +911,139 @@ private fun PagedHorizontalViewer(
             }
     }
 
-    SmoothZoomableBox(
-        modifier = Modifier.fillMaxSize(),
-        doubleTapScale = 2.5f,
-        isPageLocked = isPageLocked,
-        onLongPress = { onPageLongPress(pagerState.currentPage + 1) }
-    ) {
-        HorizontalPager(
-            state = pagerState,
-            userScrollEnabled = !isPageLocked,
-            modifier = Modifier.fillMaxSize()
-        ) { pageIndex ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(6.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                PdfPageItem(
-                    renderEngine = renderEngine,
-                    pageIndex = pageIndex,
-                    colorFilter = colorFilter
-                )
+    Box(modifier = Modifier.fillMaxSize()) {
+        SmoothZoomableBox(
+            modifier = Modifier.fillMaxSize(),
+            minScale = PdfZoomMath.DEFAULT_MIN_SCALE,
+            maxScale = PdfZoomMath.DEFAULT_MAX_SCALE,
+            doubleTapScale = PdfZoomMath.DEFAULT_DOUBLE_TAP_SCALE,
+            isPageLocked = isPageLocked,
+            onLongPress = { onPageLongPress(pagerState.currentPage + 1) },
+            onHorizontalEdgeSwipe = { direction ->
+                val targetIndex = pagerState.currentPage + direction
+                if (targetIndex in 0 until pageCount) {
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(targetIndex)
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                userScrollEnabled = !isPageLocked,
+                modifier = Modifier.fillMaxSize()
+            ) { pageIndex ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    PdfPageItem(
+                        renderEngine = renderEngine,
+                        pageIndex = pageIndex,
+                        colorFilter = colorFilter
+                    )
+                }
             }
         }
 
-        // Page Indicator
-        Surface(
+        val currentPageNumber = pagerState.currentPage + 1
+        PdfPageNavigationPill(
+            currentPage = currentPageNumber,
+            pageCount = pageCount,
+            onPrevPage = {
+                if (pagerState.currentPage > 0) {
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                    }
+                }
+            },
+            onNextPage = {
+                if (pagerState.currentPage < pageCount - 1) {
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                    }
+                }
+            },
+            onPillClick = onPagePillClick,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 14.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .clickable(onClick = onPagePillClick),
-            shape = RoundedCornerShape(20.dp),
-            color = Color.Black.copy(alpha = 0.8f),
-            shadowElevation = 4.dp
+                .padding(bottom = 12.dp)
+        )
+    }
+}
+
+@Composable
+private fun PdfPageNavigationPill(
+    currentPage: Int,
+    pageCount: Int,
+    onPrevPage: () -> Unit,
+    onNextPage: () -> Unit,
+    onPillClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(24.dp),
+        color = Color.Black.copy(alpha = 0.82f),
+        shadowElevation = 4.dp
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
-            Text(
-                text = if (isPageLocked) "Page ${pagerState.currentPage + 1} of $pageCount • 🔒 Locked" else "Page ${pagerState.currentPage + 1} of $pageCount • Tap to Jump",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-            )
+            if (pageCount > 1) {
+                IconButton(
+                    onClick = onPrevPage,
+                    enabled = currentPage > 1,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("pdf_prev_page_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = "Previous page",
+                        tint = if (currentPage > 1) Color.White else Color.White.copy(alpha = 0.35f)
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable(onClick = onPillClick)
+                    .testTag("pdf_page_indicator_pill")
+                    .padding(horizontal = if (pageCount > 1) 8.dp else 16.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Page $currentPage of $pageCount",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            if (pageCount > 1) {
+                IconButton(
+                    onClick = onNextPage,
+                    enabled = currentPage < pageCount,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("pdf_next_page_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Next page",
+                        tint = if (currentPage < pageCount) Color.White else Color.White.copy(alpha = 0.35f)
+                    )
+                }
+            }
         }
     }
 }

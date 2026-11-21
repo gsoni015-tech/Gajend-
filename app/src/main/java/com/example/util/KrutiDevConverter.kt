@@ -38,8 +38,36 @@ object KrutiDevConverter {
     }
 
     fun isLikelyKrutiDev(text: String): Boolean {
-        val sample = text.take(100)
-        val krutiChars = listOf("ç", "˜", "ø", "ù", "ú", "û", "ü", "ý", "þ", "å", "æ", "è", "é", "ê", "ë", "ì", "í", "î", "ï", "ð", "ñ", "ò", "ó", "ô", "õ", "ö", "÷", "vks", "vkS", "vk", "bZ")
-        return krutiChars.any { sample.contains(it) }
+        if (text.isBlank()) return false
+        val sample = text.take(600)
+        // If text already contains Unicode Devanagari, it is not legacy Kruti Dev encoding
+        if (sample.any { it in '\u0900'..'\u097F' }) return false
+
+        // 1. High-confidence special characters used in Kruti Dev 010
+        val specialKrutiChars = listOf(
+            "ç", "˜", "ø", "ù", "ú", "û", "ü", "ý", "þ", "å", "æ", "è",
+            "é", "ê", "ë", "ì", "í", "î", "ï", "ð", "ñ", "ò", "ó", "ô",
+            "õ", "ö", "÷", "»", "±", "²", "³", "´", "µ", "¶", "·", "¸",
+            "¹", "º", "½", "¾", "¿", "À", "Á", "Â", "Ã", "Ä", "Å", "Æ",
+            "Ç", "È", "É", "Ê"
+        )
+        if (specialKrutiChars.any { sample.contains(it) }) return true
+
+        // 2. Common ASCII-only Kruti Dev 010 letter sequences & punctuation inside words
+        val asciiKrutiTokens = listOf(
+            "vks", "vkS", "bZ", "lsok esa", "egksn;", "dk;kZy;", "ljdkj",
+            "izfrfyfi", "fnukad", "i=kad", "foHkkx", "vf/kdkjh", "jktLFkku",
+            "dk;Z", "vkns'k", "fu;e", "gLrk{kj", "mijksDr", "d`i;k", "blfy,",
+            "gSa", "tkrk gS", "fd;k", "fy,", "esa "
+        )
+        var score = 0
+        for (token in asciiKrutiTokens) {
+            if (sample.contains(token)) score += 2
+        }
+        // Semicolon, '[' or '/' directly attached to letters is a classic Kruti Dev marker (e.g., ';', '[k', '/k')
+        val midWordPunctuationRegex = Regex("[A-Za-z][;/\\[\\\\=][A-Za-z]|[;/\\[\\\\=][A-Za-z]{2,}")
+        score += midWordPunctuationRegex.findAll(sample).count()
+
+        return score >= 2
     }
 }
