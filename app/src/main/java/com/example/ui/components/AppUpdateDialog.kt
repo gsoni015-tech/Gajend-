@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -35,9 +36,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.BuildConfig
+import com.example.ui.theme.BrandCrimson
 import com.example.ui.theme.BrandPrimary
 import com.example.ui.theme.BrandPrimaryContainer
 import com.example.ui.theme.TextPrimary
@@ -55,7 +58,9 @@ fun AppUpdateDialog(
     onInstallApk: (UpdateCheckState.ReadyToInstall) -> Unit,
     onOpenInstallPermission: () -> Unit,
     onOpenInBrowser: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onOpenPlayStore: () -> Unit = {},
+    onRetryCheck: () -> Unit = {}
 ) {
     if (!visible || state is UpdateCheckState.Idle) return
 
@@ -115,7 +120,11 @@ fun AppUpdateDialog(
                 },
                 text = {
                     Text(
-                        text = "You are using the latest version (v${state.currentVersionName} • Build ${state.currentVersionCode}).",
+                        text = if (state.hasRemoteRelease) {
+                            "You are using the latest version (v${state.currentVersionName} • Build ${state.currentVersionCode})."
+                        } else {
+                            "You are using v${state.currentVersionName} (Build ${state.currentVersionCode}). No newer direct update is published right now — you can also check Google Play Store."
+                        },
                         fontSize = 13.sp,
                         color = TextSecondary
                     )
@@ -127,6 +136,17 @@ fun AppUpdateDialog(
                         modifier = Modifier.testTag("app_update_ok_button")
                     ) {
                         Text("OK")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            onDismiss()
+                            onOpenPlayStore()
+                        },
+                        modifier = Modifier.testTag("app_update_play_store_button")
+                    ) {
+                        Text("Play Store")
                     }
                 }
             )
@@ -328,6 +348,14 @@ fun AppUpdateDialog(
             AlertDialog(
                 onDismissRequest = onDismiss,
                 modifier = Modifier.testTag("app_update_dialog"),
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = BrandCrimson,
+                        modifier = Modifier.size(28.dp)
+                    )
+                },
                 title = {
                     Text(
                         text = "Update Check",
@@ -353,15 +381,25 @@ fun AppUpdateDialog(
                         }
                     } else {
                         Button(
-                            onClick = onDismiss,
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)
+                            onClick = onRetryCheck,
+                            colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
+                            modifier = Modifier.testTag("app_update_retry_button")
                         ) {
-                            Text("OK")
+                            Text("Retry")
                         }
                     }
                 },
                 dismissButton = {
-                    if (!state.fallbackApkUrl.isNullOrBlank()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = {
+                                onDismiss()
+                                onOpenPlayStore()
+                            },
+                            modifier = Modifier.testTag("app_update_play_store_button")
+                        ) {
+                            Text("Play Store")
+                        }
                         TextButton(onClick = onDismiss) {
                             Text("Close")
                         }
@@ -377,16 +415,46 @@ fun AppUpdateToolsCard(
     state: UpdateCheckState,
     onCheckUpdate: () -> Unit,
     onUpdateNow: (AppReleaseConfig) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onInstallReady: (UpdateCheckState.ReadyToInstall) -> Unit = {},
+    onOpenDownloadingDialog: () -> Unit = {}
 ) {
     val isChecking = state is UpdateCheckState.Checking
+    val isDownloading = state is UpdateCheckState.Downloading
     val availableRelease = (state as? UpdateCheckState.UpdateAvailable)?.release
+    val readyToInstall = state as? UpdateCheckState.ReadyToInstall
+    val isError = state is UpdateCheckState.Error
+
     val subtitleText = when (state) {
         is UpdateCheckState.UpdateAvailable -> "New update v${state.release.latestVersionName} available!"
+        is UpdateCheckState.Downloading -> {
+            if (state.progressPercent > 0) {
+                "Downloading v${state.release.latestVersionName} (${state.progressPercent}%)..."
+            } else {
+                "Downloading update v${state.release.latestVersionName}..."
+            }
+        }
+        is UpdateCheckState.ReadyToInstall -> {
+            if (state.needsInstallPermission) {
+                "Update downloaded • Allow install permission"
+            } else {
+                "Update v${state.release.latestVersionName} ready to install"
+            }
+        }
         is UpdateCheckState.UpToDate -> "You are on the latest version"
-        is UpdateCheckState.Checking -> "Checking Firebase for updates..."
-        else -> "Direct APK update check (non-Play Store)"
+        is UpdateCheckState.Checking -> "Checking for updates..."
+        is UpdateCheckState.Error -> state.message
+        UpdateCheckState.Idle -> "Check for latest app updates"
     }
+
+    val subtitleColor = when {
+        availableRelease != null || isDownloading -> BrandPrimary
+        readyToInstall != null -> Color(0xFF16A34A)
+        isError -> BrandCrimson
+        else -> TextSecondary
+    }
+
+    val highlightBorder = availableRelease != null || readyToInstall != null
 
     Surface(
         modifier = modifier
@@ -394,7 +462,7 @@ fun AppUpdateToolsCard(
             .testTag("tools_app_update_card"),
         shape = RoundedCornerShape(14.dp),
         color = WhiteMixCard,
-        border = BorderStroke(1.dp, if (availableRelease != null) BrandPrimary.copy(alpha = 0.45f) else WhiteMixBorder),
+        border = BorderStroke(1.dp, if (highlightBorder) BrandPrimary.copy(alpha = 0.45f) else WhiteMixBorder),
         shadowElevation = 1.dp
     ) {
         Row(
@@ -436,39 +504,79 @@ fun AppUpdateToolsCard(
                     Text(
                         text = subtitleText,
                         fontSize = 12.sp,
-                        color = if (availableRelease != null) BrandPrimary else TextSecondary
+                        color = subtitleColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            if (availableRelease != null) {
-                Button(
-                    onClick = { onUpdateNow(availableRelease) },
-                    colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("tools_check_update_button")
-                ) {
-                    Text("Update", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            when {
+                availableRelease != null -> {
+                    Button(
+                        onClick = { onUpdateNow(availableRelease) },
+                        colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("tools_check_update_button")
+                    ) {
+                        Text("Update", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
-            } else {
-                OutlinedButton(
-                    onClick = onCheckUpdate,
-                    enabled = !isChecking,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("tools_check_update_button")
-                ) {
-                    if (isChecking) {
+                readyToInstall != null -> {
+                    Button(
+                        onClick = { onInstallReady(readyToInstall) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (readyToInstall.needsInstallPermission) BrandPrimary else Color(0xFF16A34A)
+                        ),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("tools_check_update_button")
+                    ) {
+                        Text(
+                            text = if (readyToInstall.needsInstallPermission) "Allow Install" else "Install",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                isDownloading -> {
+                    OutlinedButton(
+                        onClick = onOpenDownloadingDialog,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("tools_check_update_button")
+                    ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(14.dp),
                             strokeWidth = 2.dp,
                             color = BrandPrimary
                         )
-                    } else {
-                        Text("Check Update", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                else -> {
+                    OutlinedButton(
+                        onClick = onCheckUpdate,
+                        enabled = !isChecking,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("tools_check_update_button")
+                    ) {
+                        if (isChecking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = BrandPrimary
+                            )
+                        } else {
+                            Text(
+                                text = if (isError) "Retry" else "Check Update",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }

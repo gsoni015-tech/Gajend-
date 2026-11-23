@@ -124,7 +124,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 import android.app.Activity
-import com.example.ads.AdMobManager
+import com.example.ads.StartIoAdManager
 
 enum class EditorToolMode {
     VIEW, DRAW, HIGHLIGHT, TEXT, SIGNATURE, STAMP, WATERMARK
@@ -148,13 +148,17 @@ fun PdfEditorScreen(
     val activity = context as? Activity
     val handleBack: () -> Unit = {
         if (activity != null) {
-            AdMobManager.showBackPressInterstitial(activity) { onBack() }
+            StartIoAdManager.showBackPressInterstitial(activity) { onBack() }
         } else {
             onBack()
         }
     }
 
     BackHandler { handleBack() }
+
+    LaunchedEffect(file.absolutePath) {
+        StartIoAdManager.loadInterstitial(context.applicationContext)
+    }
 
     var activeTool by remember { mutableStateOf(EditorToolMode.VIEW) }
     var selectedColor by remember { mutableStateOf(0xFF1E3A8A) }
@@ -421,7 +425,11 @@ fun PdfEditorScreen(
                                     if (success) {
                                         Toast.makeText(context, "Saved successfully: ${outFile.name}", Toast.LENGTH_LONG).show()
                                         viewModel.refreshDocuments(force = true)
-                                        onBack()
+                                        if (activity != null) {
+                                            StartIoAdManager.showTaskCompletionInterstitial(activity) { onBack() }
+                                        } else {
+                                            onBack()
+                                        }
                                     } else {
                                         Toast.makeText(context, "Error saving document", Toast.LENGTH_SHORT).show()
                                     }

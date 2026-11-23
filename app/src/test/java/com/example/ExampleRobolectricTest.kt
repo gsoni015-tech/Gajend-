@@ -177,10 +177,10 @@ class ExampleRobolectricTest {
   val composeTestRule = androidx.compose.ui.test.junit4.createComposeRule()
 
   @Test
-  fun `adaptiveBannerAdView renders visible reserved banner slot`() {
+  fun `startIoBannerAdView renders visible reserved banner slot`() {
     composeTestRule.setContent {
       com.example.ui.theme.MyApplicationTheme {
-        com.example.ads.AdaptiveBannerAdView()
+        com.example.ads.StartIoBannerAdView()
       }
     }
     composeTestRule.waitForIdle()

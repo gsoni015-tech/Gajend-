@@ -77,8 +77,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.ads.AdManager
-import com.example.ads.AdaptiveBannerAdView
+import com.example.ads.StartIoAdManager
+import com.example.ads.StartIoBannerAdView
 import com.example.data.cache.PdfFastCacheManager
 import com.example.data.cloud.GoogleDriveRepository
 import com.example.data.cloud.attemptAutoSignIn
@@ -108,8 +108,6 @@ import com.example.update.AppUpdateManager
 import com.example.util.PermissionUtils
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -132,7 +130,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        AdManager.initialize(this)
+        StartIoAdManager.initialize(this)
+        AppUpdateManager.bindActivity(this)
 
         // Handle external Intent if opened with document
         handleIncomingIntent(intent)
@@ -146,7 +145,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        AdManager.onAppResumed(this)
+        StartIoAdManager.onAppResumed(this)
+        AppUpdateManager.bindActivity(this)
         AppUpdateManager.refreshInstallPermissionState(this)
     }
 
@@ -179,7 +179,6 @@ fun MainAppContent(viewModel: PdfViewModel) {
     var selectedNavTab by remember { mutableStateOf(MainNavTab.FILES) }
     val pendingOpenDocument by viewModel.pendingOpenDocument.collectAsState()
     val allDocuments by viewModel.allPdfs.collectAsState()
-    val isInterstitialReady by AdManager.isInterstitialReadyFlow.collectAsState()
     val updateState by AppUpdateManager.state.collectAsState()
     val isUpdateDialogVisible by AppUpdateManager.dialogVisible.collectAsState()
 
@@ -195,7 +194,7 @@ fun MainAppContent(viewModel: PdfViewModel) {
             onUnauthenticated = {},
             scope = appScope
         )
-        AppUpdateManager.checkForUpdates(context.applicationContext, isManual = false)
+        AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = false)
     }
 
     val cloudViewModel: CloudSyncViewModel? = currentUser?.let { user ->
@@ -239,32 +238,6 @@ fun MainAppContent(viewModel: PdfViewModel) {
         }
     }
 
-    // Impression #1: Show App-Open Interstitial once on cold launch while Home is active
-    LaunchedEffect(isInterstitialReady, currentScreen, lifecycleOwner) {
-        if (isInterstitialReady && currentScreen is AppScreen.Main) {
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                AdManager.tryShowLaunchInterstitial(activity, isHomeActive = true)
-            }
-        }
-    }
-
-    // Periodic Interstitial scheduler every ~25s while the Activity is actively RESUMED
-    LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (isActive) {
-                val remaining = AdManager.remainingInterstitialCooldownMs()
-                val waitMs = if (remaining > 0L) remaining + 250L else AdManager.INTERSTITIAL_COOLDOWN_MS
-                delay(waitMs)
-                if (!AdManager.isInterstitialReadyFlow.value) {
-                    AdManager.loadInterstitial(context.applicationContext)
-                }
-                if (AdManager.canShowInterstitial()) {
-                    AdManager.showInterstitialAd(activity) {}
-                }
-            }
-        }
-    }
-
     BackHandler(enabled = currentScreen is AppScreen.Main && selectedNavTab != MainNavTab.FILES) {
         selectedNavTab = MainNavTab.FILES
     }
@@ -274,8 +247,7 @@ fun MainAppContent(viewModel: PdfViewModel) {
     var pinError by remember { mutableStateOf(false) }
 
     fun openWithInterstitialCheck(entity: PdfEntity) {
-        AdManager.markUserNavigatedFromHome()
-        AdManager.showOpenDocumentInterstitial(activity) {
+        StartIoAdManager.showOpenDocumentInterstitial(activity) {
             viewModel.openPdf(entity)
             currentScreen = AppScreen.Viewer(entity)
         }
@@ -355,7 +327,7 @@ fun MainAppContent(viewModel: PdfViewModel) {
                             .navigationBarsPadding(),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        AdaptiveBannerAdView(modifier = Modifier.fillMaxWidth().widthIn(max = 728.dp))
+                        StartIoBannerAdView(modifier = Modifier.fillMaxWidth().widthIn(max = 728.dp))
 
                         MainBottomNavigationBar(
                             selectedNavTab = selectedNavTab,
@@ -468,21 +440,25 @@ fun MainAppContent(viewModel: PdfViewModel) {
         state = updateState,
         visible = isUpdateDialogVisible,
         onStartDownload = { release ->
-            appScope.launch {
-                AppUpdateManager.downloadAndInstallApk(context.applicationContext, release)
-            }
+            AppUpdateManager.startDownloadAndInstall(activity ?: context, release)
         },
         onInstallApk = { readyState ->
-            AppUpdateManager.launchApkInstaller(context, readyState.apkFile)
+            AppUpdateManager.launchApkInstaller(activity ?: context, readyState.apkFile)
         },
         onOpenInstallPermission = {
-            AppUpdateManager.openUnknownSourcesSettings(context)
+            AppUpdateManager.openUnknownSourcesSettings(activity ?: context)
         },
         onOpenInBrowser = { url ->
-            AppUpdateManager.openDownloadInBrowser(context, url)
+            AppUpdateManager.openDownloadInBrowser(activity ?: context, url)
         },
         onDismiss = {
             AppUpdateManager.dismissDialog()
+        },
+        onOpenPlayStore = {
+            AppUpdateManager.openPlayStoreForUpdate(activity ?: context)
+        },
+        onRetryCheck = {
+            AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = true)
         }
     )
 }

@@ -82,7 +82,6 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
@@ -94,16 +93,11 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import com.example.ads.AdManager
-import com.example.ads.AdMobManager
-import com.example.ads.AdaptiveBannerAdView
+import com.example.ads.StartIoAdManager
+import com.example.ads.StartIoBannerAdView
 import com.example.data.local.PdfEntity
 import com.example.reader.OfficeDocumentHelper
 import com.example.reader.TextToSpeechHelper
@@ -129,10 +123,9 @@ fun WordViewerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
-    val lifecycleOwner = LocalLifecycleOwner.current
     val handleBack: () -> Unit = {
         if (activity != null) {
-            AdMobManager.showBackPressInterstitial(activity) { onBack() }
+            StartIoAdManager.showBackPressInterstitial(activity) { onBack() }
         } else {
             onBack()
         }
@@ -140,23 +133,9 @@ fun WordViewerScreen(
 
     BackHandler { handleBack() }
 
-    // Preload interstitial & schedule Impression #2 mid-reading inside Word Viewer
-    var hasAttemptedInDocAd by remember(entity.path) { mutableStateOf(false) }
-    LaunchedEffect(entity.path, lifecycleOwner) {
-        AdManager.loadInterstitial(context.applicationContext)
-        if (!hasAttemptedInDocAd) {
-            val cooldownRemaining = AdManager.remainingInterstitialCooldownMs()
-            val waitMs = maxOf(AdManager.DOCUMENT_READING_AD_DELAY_MS, cooldownRemaining + 500L)
-            delay(waitMs)
-            AdManager.loadInterstitial(context.applicationContext)
-            AdManager.isInterstitialReadyFlow.first { it }
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                if (!hasAttemptedInDocAd) {
-                    hasAttemptedInDocAd = true
-                    AdManager.showDelayedDocumentInterstitial(activity)
-                }
-            }
-        }
+    // Preload interstitial so it is ready when closing the document
+    LaunchedEffect(entity.path) {
+        StartIoAdManager.loadInterstitial(context.applicationContext)
     }
     var doc by remember { mutableStateOf<WordDocument?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -601,7 +580,7 @@ fun WordViewerScreen(
                         .navigationBarsPadding(),
                     contentAlignment = Alignment.Center
                 ) {
-                    AdaptiveBannerAdView(
+                    StartIoBannerAdView(
                         modifier = Modifier
                             .fillMaxWidth()
                             .widthIn(max = 728.dp)

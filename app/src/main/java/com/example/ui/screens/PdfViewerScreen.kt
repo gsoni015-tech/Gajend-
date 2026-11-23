@@ -88,17 +88,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
-import com.example.ads.AdManager
-import com.example.ads.AdaptiveBannerAdView
+import com.example.ads.StartIoAdManager
+import com.example.ads.StartIoBannerAdView
 import com.example.data.cache.PdfFastCacheManager
 import com.example.data.local.PdfEntity
 import com.example.pdf.PdfToolsHelper
@@ -112,7 +109,6 @@ import com.example.ui.theme.WhiteMixBackground
 import com.example.ui.theme.WhiteMixSurface
 import com.example.ui.viewmodel.PdfViewModel
 import com.example.ui.viewmodel.ReaderThemeMode
-import kotlinx.coroutines.flow.first
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,7 +122,6 @@ fun PdfViewerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
-    val lifecycleOwner = LocalLifecycleOwner.current
     var file by remember(entity.path) {
         mutableStateOf(
             PdfFastCacheManager.getFastReadableFileIfPresent(context, entity) ?: File(entity.path)
@@ -139,28 +134,14 @@ fun PdfViewerScreen(
         }
     }
 
-    // Preload interstitial and schedule Impression #2 mid-reading (15s + remaining 60s cooldown)
-    var hasAttemptedInDocAd by remember(entity.path) { mutableStateOf(false) }
-    LaunchedEffect(entity.path, lifecycleOwner) {
-        AdManager.loadInterstitial(context.applicationContext)
-        if (!hasAttemptedInDocAd) {
-            val cooldownRemaining = AdManager.remainingInterstitialCooldownMs()
-            val waitMs = maxOf(AdManager.DOCUMENT_READING_AD_DELAY_MS, cooldownRemaining + 500L)
-            kotlinx.coroutines.delay(waitMs)
-            AdManager.loadInterstitial(context.applicationContext)
-            AdManager.isInterstitialReadyFlow.first { it }
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                if (!hasAttemptedInDocAd) {
-                    hasAttemptedInDocAd = true
-                    AdManager.showDelayedDocumentInterstitial(activity)
-                }
-            }
-        }
+    // Preload interstitial so it is ready when closing the document
+    LaunchedEffect(entity.path) {
+        StartIoAdManager.loadInterstitial(context.applicationContext)
     }
 
     // Interstitial Ad trigger on device Back press with strict 60s cooldown protection
     val handleBackPress: () -> Unit = {
-        AdManager.showBackPressInterstitial(activity) { onBack() }
+        StartIoAdManager.showBackPressInterstitial(activity) { onBack() }
     }
 
     var showThumbnailBottomSheet by remember { mutableStateOf(false) }
@@ -651,7 +632,7 @@ fun PdfViewerScreen(
                     .navigationBarsPadding(),
                 contentAlignment = Alignment.Center
             ) {
-                AdaptiveBannerAdView(
+                StartIoBannerAdView(
                     modifier = Modifier
                         .fillMaxWidth()
                         .widthIn(max = 728.dp)
@@ -885,7 +866,7 @@ fun PdfViewerScreen(
                     onClick = {
                         showCompressDialog = false
                         viewModel.executeCompressPdf(file, selectedLevel) {
-                            AdManager.showTaskCompletionInterstitial(activity) {}
+                            StartIoAdManager.showTaskCompletionInterstitial(activity) {}
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = BrandPrimary)

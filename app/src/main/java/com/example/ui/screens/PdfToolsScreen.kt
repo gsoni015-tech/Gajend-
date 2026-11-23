@@ -85,7 +85,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ads.AdManager
+import com.example.ads.StartIoAdManager
 import com.example.pdf.PdfToolsHelper
 import com.example.ui.components.AppUpdateToolsCard
 import com.example.ui.theme.BrandCrimson
@@ -123,12 +123,12 @@ fun PdfToolsScreen(
     val scope = rememberCoroutineScope()
     val isProcessing by viewModel.isProcessing.collectAsState()
     val progressMessage by viewModel.progressMessage.collectAsState()
-    val isRewardedAdLoading by AdManager.isRewardedLoadingFlow.collectAsState()
+    val isRewardedAdLoading by StartIoAdManager.isRewardedLoadingFlow.collectAsState()
     val updateState by AppUpdateManager.state.collectAsState()
 
     LaunchedEffect(Unit) {
-        AdManager.loadRewarded(context.applicationContext)
-        AdManager.loadInterstitial(context.applicationContext)
+        StartIoAdManager.loadRewarded(context.applicationContext)
+        StartIoAdManager.loadInterstitial(context.applicationContext)
     }
 
     var isProUnlocked by remember { mutableStateOf(false) }
@@ -366,10 +366,20 @@ fun PdfToolsScreen(
                                 if (!isProUnlocked) {
                                     OutlinedButton(
                                         onClick = {
-                                            AdManager.showRewardedAd(activity) {
-                                                isProUnlocked = true
-                                                Toast.makeText(context, "Ultra HD & Pro Features Unlocked!", Toast.LENGTH_LONG).show()
-                                            }
+                                            StartIoAdManager.showRewardedAd(
+                                                activity = activity,
+                                                onRewarded = {
+                                                    isProUnlocked = true
+                                                    Toast.makeText(context, "Ultra HD & Pro Features Unlocked!", Toast.LENGTH_LONG).show()
+                                                },
+                                                onUnavailable = {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Rewarded ad unavailable right now. Please try again shortly.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            )
                                         },
                                         enabled = !isRewardedAdLoading,
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -448,20 +458,31 @@ fun PdfToolsScreen(
                     AppUpdateToolsCard(
                         state = updateState,
                         onCheckUpdate = {
-                            scope.launch {
-                                AppUpdateManager.checkForUpdates(
-                                    context = context.applicationContext,
-                                    isManual = true
-                                )
-                            }
+                            AppUpdateManager.startCheckForUpdates(
+                                context = activity ?: context,
+                                isManual = true
+                            )
                         },
                         onUpdateNow = { release ->
-                            scope.launch {
-                                AppUpdateManager.downloadAndInstallApk(
-                                    context = context.applicationContext,
-                                    release = release
-                                )
+                            AppUpdateManager.startDownloadAndInstall(
+                                context = activity ?: context,
+                                release = release
+                            )
+                        },
+                        onInstallReady = { readyState ->
+                            val targetContext = activity ?: context
+                            if (readyState.needsInstallPermission) {
+                                AppUpdateManager.openUnknownSourcesSettings(targetContext)
+                            } else {
+                                AppUpdateManager.launchApkInstaller(targetContext, readyState.apkFile)
                             }
+                        },
+                        onOpenDownloadingDialog = {
+                            AppUpdateManager.startDownloadAndInstall(
+                                context = activity ?: context,
+                                release = (updateState as? com.example.update.UpdateCheckState.Downloading)?.release
+                                    ?: return@AppUpdateToolsCard
+                            )
                         }
                     )
                 }
@@ -549,7 +570,7 @@ fun PdfToolsScreen(
                             jpgConversionResult = result
                             // Interstitial on task completion
                             if (activity != null) {
-                                AdManager.showTaskCompletionInterstitial(activity) {}
+                                StartIoAdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -633,7 +654,7 @@ fun PdfToolsScreen(
                         showImageToPdfDialog = false
                         viewModel.executeImagesToPdf(context, selectedImageUris, pdfTitle) {
                             if (activity != null) {
-                                AdManager.showTaskCompletionInterstitial(activity) {}
+                                StartIoAdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -692,15 +713,25 @@ fun PdfToolsScreen(
                     onClick = {
                         val file = selectedPdfForCompress!!
                         if (requiresReward) {
-                            AdManager.showRewardedAd(activity) {
-                                isProUnlocked = true
-                                showCompressDialog = false
-                                viewModel.executeCompressPdf(file, selectedLevel) {}
-                            }
+                            StartIoAdManager.showRewardedAd(
+                                activity = activity,
+                                onRewarded = {
+                                    isProUnlocked = true
+                                    showCompressDialog = false
+                                    viewModel.executeCompressPdf(file, selectedLevel) {}
+                                },
+                                onUnavailable = {
+                                    Toast.makeText(
+                                        context,
+                                        "Rewarded ad unavailable right now. Please try again shortly.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            )
                         } else {
                             showCompressDialog = false
                             viewModel.executeCompressPdf(file, selectedLevel) {
-                                AdManager.showTaskCompletionInterstitial(activity) {}
+                                StartIoAdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -816,7 +847,7 @@ fun PdfToolsScreen(
                         showSplitDialog = false
                         viewModel.executeSplitPdf(context, file, from, to, splitTitle) { success ->
                             if (success && activity != null) {
-                                AdManager.showTaskCompletionInterstitial(activity) {}
+                                StartIoAdManager.showTaskCompletionInterstitial(activity) {}
                             }
                         }
                     },
@@ -930,6 +961,9 @@ fun PdfToolsScreen(
                                 if (lockPinInput == currentPinForDoc || currentPinForDoc.isBlank()) {
                                     viewModel.lockOrUnlockPdfByUri(selectedUriForLock!!, "")
                                     showLockDialog = false
+                                    if (activity != null) {
+                                        StartIoAdManager.showTaskCompletionInterstitial(activity) {}
+                                    }
                                 } else {
                                     lockPinError = "Incorrect current PIN. Cannot unlock."
                                 }
@@ -948,6 +982,9 @@ fun PdfToolsScreen(
                                 } else {
                                     viewModel.lockOrUnlockPdfByUri(selectedUriForLock!!, lockPinInput)
                                     showLockDialog = false
+                                    if (activity != null) {
+                                        StartIoAdManager.showTaskCompletionInterstitial(activity) {}
+                                    }
                                 }
                             } else {
                                 if (lockPinInput.length < 4) {
@@ -955,6 +992,9 @@ fun PdfToolsScreen(
                                 } else {
                                     viewModel.lockOrUnlockPdfByUri(selectedUriForLock!!, lockPinInput)
                                     showLockDialog = false
+                                    if (activity != null) {
+                                        StartIoAdManager.showTaskCompletionInterstitial(activity) {}
+                                    }
                                 }
                             }
                         },
@@ -1132,7 +1172,7 @@ fun PdfToolsScreen(
     // On-Demand Rewarded Ad Loading Dialog
     if (isRewardedAdLoading) {
         AlertDialog(
-            onDismissRequest = { AdManager.cancelPendingRewardedAd() },
+            onDismissRequest = { StartIoAdManager.cancelPendingRewardedAd() },
             title = {
                 Text(
                     text = "Loading Reward Ad...",
@@ -1163,7 +1203,7 @@ fun PdfToolsScreen(
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { AdManager.cancelPendingRewardedAd() }) {
+                TextButton(onClick = { StartIoAdManager.cancelPendingRewardedAd() }) {
                     Text("Cancel", color = TextSecondary)
                 }
             }

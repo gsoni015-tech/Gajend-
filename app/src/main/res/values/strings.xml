@@ -1,10 +1,6 @@
 <resources>
     <string name="app_name">Narayani PDF Reader</string>
-    <string name="admob_app_id">ca-app-pub-9247143643125748~1169242249</string>
-    <string name="admob_banner">ca-app-pub-9247143643125748/5366325906</string>
-    <string name="admob_interstitial">ca-app-pub-9247143643125748/3927267520</string>
-    <string name="admob_rewarded">ca-app-pub-9247143643125748/5688861742</string>
-    <string name="admob_native_advanced">ca-app-pub-9247143643125748/6648093340</string>
+    <string name="startio_app_id" translatable="false">210114038</string>
     <string name="nav_tab_documents">Documents</string>
     <string name="nav_tab_recent">Recent Files</string>
     <string name="nav_tab_tools">Tools</string>

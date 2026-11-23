@@ -1,6 +1,8 @@
 package com.example.update
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -11,18 +13,27 @@ import androidx.core.content.FileProvider
 import com.example.BuildConfig
 import com.example.R
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.Source
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
@@ -47,7 +58,8 @@ sealed class UpdateCheckState {
 
     data class UpToDate(
         val currentVersionCode: Long,
-        val currentVersionName: String
+        val currentVersionName: String,
+        val hasRemoteRelease: Boolean = false
     ) : UpdateCheckState()
 
     data class Downloading(
@@ -73,6 +85,14 @@ object AppUpdateManager {
     private const val DOC_LATEST_RELEASE = "latest_release"
     private const val UPDATES_SUBDIR = "app_updates"
     private const val UPDATE_APK_FILENAME = "narayani_update.apk"
+    private const val UPDATE_CHECK_TIMEOUT_MS = 12_000L
+
+    private val managerScope by lazy {
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    }
+    private var checkJob: Job? = null
+    private var downloadJob: Job? = null
+    private var activityRef: WeakReference<Activity>? = null
 
     private val _state = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
     val state: StateFlow<UpdateCheckState> = _state.asStateFlow()
@@ -89,6 +109,23 @@ object AppUpdateManager {
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
+    }
+
+    fun bindActivity(activity: Activity) {
+        if (!activity.isFinishing && !activity.isDestroyed) {
+            activityRef = WeakReference(activity)
+        }
+    }
+
+    private fun resolveActivity(context: Context): Activity? {
+        var current: Context? = context
+        while (current is ContextWrapper) {
+            if (current is Activity) {
+                return current.takeIf { !it.isFinishing && !it.isDestroyed }
+            }
+            current = current.baseContext
+        }
+        return activityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
     }
 
     fun isUpdateAvailable(currentVersionCode: Long, remoteVersionCode: Long): Boolean {
@@ -139,11 +176,21 @@ object AppUpdateManager {
 
     fun parseReleaseMap(data: Map<String, Any?>?): AppReleaseConfig? {
         if (data == null) return null
-        val versionCode = (data["latestVersionCode"] as? Number)?.toLong() ?: 0L
-        val versionName = (data["latestVersionName"] as? String)?.trim().orEmpty()
-        val apkUrl = (data["apkUrl"] as? String)?.trim().orEmpty()
-        val releaseNotes = (data["releaseNotes"] as? String)?.trim().orEmpty()
-        val forceUpdate = data["forceUpdate"] as? Boolean ?: false
+        val rawVersionCode = data["latestVersionCode"] ?: data["latest_version_code"]
+        val versionCode = when (rawVersionCode) {
+            is Number -> rawVersionCode.toLong()
+            is String -> rawVersionCode.trim().toLongOrNull() ?: 0L
+            else -> 0L
+        }
+        val versionName = ((data["latestVersionName"] ?: data["latest_version_name"]) as? String)?.trim().orEmpty()
+        val apkUrl = ((data["apkUrl"] ?: data["apk_url"]) as? String)?.trim().orEmpty()
+        val releaseNotes = ((data["releaseNotes"] ?: data["release_notes"]) as? String)?.trim().orEmpty()
+        val rawForceUpdate = data["forceUpdate"] ?: data["force_update"]
+        val forceUpdate = when (rawForceUpdate) {
+            is Boolean -> rawForceUpdate
+            is String -> rawForceUpdate.equals("true", ignoreCase = true)
+            else -> false
+        }
         if (versionCode <= 0L || versionName.isEmpty() || !isValidHttpsApkUrl(apkUrl)) {
             return null
         }
@@ -156,11 +203,71 @@ object AppUpdateManager {
         )
     }
 
+    fun buildPlayStoreWebUrl(packageName: String): String {
+        return "https://play.google.com/store/apps/details?id=${packageName.trim()}"
+    }
+
+    fun formatUpdateErrorMessage(error: Throwable): String {
+        return when (error) {
+            is TimeoutCancellationException ->
+                "Update check timed out. Please check your internet connection or check Google Play Store."
+            is FirebaseFirestoreException -> when (error.code) {
+                FirebaseFirestoreException.Code.PERMISSION_DENIED ->
+                    "Update server access denied. Please try updating from Google Play Store."
+                FirebaseFirestoreException.Code.UNAVAILABLE,
+                FirebaseFirestoreException.Code.DEADLINE_EXCEEDED ->
+                    "Unable to reach update server. Please check your internet connection."
+                else ->
+                    "Unable to check for updates right now (${error.code.name})."
+            }
+            else ->
+                "Unable to check for updates right now. Please check your internet connection."
+        }
+    }
+
     fun canRequestPackageInstalls(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.packageManager.canRequestPackageInstalls()
+            context.applicationContext.packageManager.canRequestPackageInstalls()
         } else {
             true
+        }
+    }
+
+    fun startCheckForUpdates(
+        context: Context,
+        isManual: Boolean,
+        currentVersionCode: Long = BuildConfig.VERSION_CODE.toLong(),
+        currentVersionName: String = BuildConfig.VERSION_NAME
+    ) {
+        resolveActivity(context)?.let { bindActivity(it) }
+        if (downloadJob?.isActive == true) {
+            if (isManual) _dialogVisible.value = true
+            return
+        }
+        if (checkJob?.isActive == true) {
+            if (isManual) _dialogVisible.value = true
+            return
+        }
+        val appContext = context.applicationContext
+        checkJob = managerScope.launch {
+            checkForUpdates(
+                context = appContext,
+                isManual = isManual,
+                currentVersionCode = currentVersionCode,
+                currentVersionName = currentVersionName
+            )
+        }
+    }
+
+    fun startDownloadAndInstall(context: Context, release: AppReleaseConfig) {
+        resolveActivity(context)?.let { bindActivity(it) }
+        if (downloadJob?.isActive == true) {
+            _dialogVisible.value = true
+            return
+        }
+        val appContext = context.applicationContext
+        downloadJob = managerScope.launch {
+            downloadAndInstallApk(appContext, release)
         }
     }
 
@@ -170,6 +277,7 @@ object AppUpdateManager {
         currentVersionCode: Long = BuildConfig.VERSION_CODE.toLong(),
         currentVersionName: String = BuildConfig.VERSION_NAME
     ) {
+        resolveActivity(context)?.let { bindActivity(it) }
         if (!isManual && hasRunLaunchCheck) return
         if (!isManual) hasRunLaunchCheck = true
 
@@ -178,16 +286,25 @@ object AppUpdateManager {
             _dialogVisible.value = true
         }
 
+        val appContext = context.applicationContext
+
         try {
-            val dbId = context.getString(R.string.firestore_database_id)
+            val dbId = appContext.getString(R.string.firestore_database_id)
             val db = FirebaseFirestore.getInstance(dbId)
-            val snapshot = db.collection(COLLECTION_APP_CONFIG)
-                .document(DOC_LATEST_RELEASE)
-                .get()
-                .await()
+            val source = if (isManual) Source.SERVER else Source.DEFAULT
+            val snapshot = withTimeout(UPDATE_CHECK_TIMEOUT_MS) {
+                db.collection(COLLECTION_APP_CONFIG)
+                    .document(DOC_LATEST_RELEASE)
+                    .get(source)
+                    .await()
+            }
 
             if (!snapshot.exists()) {
-                val upToDate = UpdateCheckState.UpToDate(currentVersionCode, currentVersionName)
+                val upToDate = UpdateCheckState.UpToDate(
+                    currentVersionCode = currentVersionCode,
+                    currentVersionName = currentVersionName,
+                    hasRemoteRelease = false
+                )
                 _state.value = upToDate
                 if (!isManual) {
                     _dialogVisible.value = false
@@ -197,7 +314,11 @@ object AppUpdateManager {
 
             val release = parseReleaseMap(snapshot.data)
             if (release == null) {
-                val upToDate = UpdateCheckState.UpToDate(currentVersionCode, currentVersionName)
+                val upToDate = UpdateCheckState.UpToDate(
+                    currentVersionCode = currentVersionCode,
+                    currentVersionName = currentVersionName,
+                    hasRemoteRelease = false
+                )
                 _state.value = upToDate
                 if (!isManual) {
                     _dialogVisible.value = false
@@ -213,36 +334,56 @@ object AppUpdateManager {
                 )
                 _dialogVisible.value = true
             } else {
-                _state.value = UpdateCheckState.UpToDate(currentVersionCode, currentVersionName)
+                _state.value = UpdateCheckState.UpToDate(
+                    currentVersionCode = currentVersionCode,
+                    currentVersionName = currentVersionName,
+                    hasRemoteRelease = true
+                )
                 if (!isManual) {
                     _dialogVisible.value = false
                 }
             }
+        } catch (te: TimeoutCancellationException) {
+            Log.w(TAG, "Update check timed out", te)
+            if (isManual) {
+                _state.value = UpdateCheckState.Error(message = formatUpdateErrorMessage(te))
+                _dialogVisible.value = true
+            } else if (_state.value is UpdateCheckState.Checking) {
+                _state.value = UpdateCheckState.Idle
+            }
         } catch (ce: CancellationException) {
+            if (_state.value is UpdateCheckState.Checking) {
+                _state.value = UpdateCheckState.Idle
+            }
             throw ce
         } catch (e: Exception) {
             Log.w(TAG, "Update check failed: ${e.message}", e)
             if (isManual) {
                 _state.value = UpdateCheckState.Error(
-                    message = "Unable to check for updates right now. Please check your internet connection."
+                    message = formatUpdateErrorMessage(e)
                 )
                 _dialogVisible.value = true
+            } else if (_state.value is UpdateCheckState.Checking) {
+                _state.value = UpdateCheckState.Idle
             }
         }
     }
 
     suspend fun downloadAndInstallApk(context: Context, release: AppReleaseConfig) {
+        resolveActivity(context)?.let { bindActivity(it) }
         if (!isValidHttpsApkUrl(release.apkUrl)) {
             _state.value = UpdateCheckState.Error("Invalid APK download URL. Only HTTPS links are allowed.")
+            _dialogVisible.value = true
             return
         }
 
+        val appContext = context.applicationContext
         _state.value = UpdateCheckState.Downloading(progressPercent = 0, release = release)
         _dialogVisible.value = true
 
         try {
             val apkFile = withContext(Dispatchers.IO) {
-                val updatesDir = File(context.cacheDir, UPDATES_SUBDIR).apply { mkdirs() }
+                val updatesDir = File(appContext.cacheDir, UPDATES_SUBDIR).apply { mkdirs() }
                 val canonicalDir = updatesDir.canonicalPath
                 val targetFile = File(updatesDir, UPDATE_APK_FILENAME).canonicalFile
                 if (!targetFile.path.startsWith(canonicalDir + File.separator)) {
@@ -256,13 +397,17 @@ object AppUpdateManager {
                 if (tempFile.exists()) tempFile.delete()
 
                 val request = Request.Builder()
-                    .url(release.apkUrl)
+                    .url(release.apkUrl.trim())
                     .get()
                     .build()
 
                 httpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IllegalStateException("Download failed (HTTP ${response.code})")
+                    }
+                    val contentType = response.header("Content-Type").orEmpty()
+                    if (contentType.contains("text/html", ignoreCase = true)) {
+                        throw IllegalStateException("Update link returned a webpage instead of a direct APK file.")
                     }
                     val body = response.body ?: throw IllegalStateException("Empty download response")
                     val totalBytes = body.contentLength()
@@ -307,19 +452,36 @@ object AppUpdateManager {
                     tempFile.copyTo(targetFile, overwrite = true)
                     tempFile.delete()
                 }
+
+                val archiveInfo = appContext.packageManager.getPackageArchiveInfo(targetFile.absolutePath, 0)
+                if (archiveInfo != null && archiveInfo.packageName != appContext.packageName) {
+                    targetFile.delete()
+                    throw IllegalStateException(
+                        "Downloaded APK (${archiveInfo.packageName}) does not match this app (${appContext.packageName})."
+                    )
+                }
+
                 targetFile
             }
 
-            val needsPerm = !canRequestPackageInstalls(context)
+            val needsPerm = !canRequestPackageInstalls(appContext)
             _state.value = UpdateCheckState.ReadyToInstall(
                 apkFile = apkFile,
                 release = release,
                 needsInstallPermission = needsPerm
             )
+            _dialogVisible.value = true
             if (!needsPerm) {
-                launchApkInstaller(context, apkFile)
+                launchApkInstaller(resolveActivity(context) ?: appContext, apkFile)
             }
         } catch (ce: CancellationException) {
+            if (_state.value is UpdateCheckState.Downloading) {
+                _state.value = UpdateCheckState.UpdateAvailable(
+                    release = release,
+                    currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
+                    currentVersionName = BuildConfig.VERSION_NAME
+                )
+            }
             throw ce
         } catch (e: Exception) {
             Log.e(TAG, "APK download failed: ${e.message}", e)
@@ -327,67 +489,154 @@ object AppUpdateManager {
                 message = e.message ?: "Failed to download update APK.",
                 fallbackApkUrl = release.apkUrl
             )
+            _dialogVisible.value = true
         }
     }
 
     fun refreshInstallPermissionState(context: Context) {
+        resolveActivity(context)?.let { bindActivity(it) }
         val current = _state.value
         if (current is UpdateCheckState.ReadyToInstall) {
             val needsPerm = !canRequestPackageInstalls(context)
             if (current.needsInstallPermission != needsPerm) {
                 _state.value = current.copy(needsInstallPermission = needsPerm)
+                if (!needsPerm && current.apkFile.exists()) {
+                    _dialogVisible.value = true
+                    launchApkInstaller(resolveActivity(context) ?: context, current.apkFile)
+                }
             }
         }
     }
 
+    fun showReadyToInstallPrompt() {
+        if (_state.value is UpdateCheckState.ReadyToInstall) {
+            _dialogVisible.value = true
+        }
+    }
+
     fun launchApkInstaller(context: Context, apkFile: File): Boolean {
-        if (!apkFile.exists()) return false
-        if (!canRequestPackageInstalls(context)) {
+        val appContext = context.applicationContext
+        val currentReleaseUrl = (_state.value as? UpdateCheckState.ReadyToInstall)?.release?.apkUrl
+        if (!apkFile.exists()) {
+            _state.value = UpdateCheckState.Error(
+                message = "Downloaded APK file is missing. Please try updating again.",
+                fallbackApkUrl = currentReleaseUrl
+            )
+            _dialogVisible.value = true
+            return false
+        }
+        if (!canRequestPackageInstalls(appContext)) {
+            val current = _state.value
+            if (current is UpdateCheckState.ReadyToInstall && !current.needsInstallPermission) {
+                _state.value = current.copy(needsInstallPermission = true)
+            }
             openUnknownSourcesSettings(context)
             return false
         }
+
+        val launchTarget = resolveActivity(context) ?: appContext
+        val needsNewTask = launchTarget !is Activity
+        val apkUri: Uri = FileProvider.getUriForFile(
+            appContext,
+            "${appContext.packageName}.provider",
+            apkFile
+        )
+
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (needsNewTask) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            launchTarget.startActivity(viewIntent)
+            return true
+        } catch (e: Exception) {
+            Log.w(TAG, "ACTION_VIEW APK install failed, trying fallback: ${e.message}", e)
+        }
+
+        @Suppress("DEPRECATION")
+        val fallbackIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = apkUri
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            if (needsNewTask) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
         return try {
-            val apkUri: Uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.provider",
-                apkFile
-            )
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(installIntent)
+            launchTarget.startActivity(fallbackIntent)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch installer: ${e.message}", e)
+            _state.value = UpdateCheckState.Error(
+                message = "Could not open the Android installer on this device. Try opening the update link in your browser.",
+                fallbackApkUrl = currentReleaseUrl
+            )
+            _dialogVisible.value = true
             false
         }
     }
 
     fun openUnknownSourcesSettings(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val launchTarget = resolveActivity(context) ?: context.applicationContext
             try {
                 val intent = Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:${context.packageName}")
                 ).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    if (launchTarget !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                context.startActivity(intent)
+                launchTarget.startActivity(intent)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to open unknown sources settings: ${e.message}", e)
+                _state.value = UpdateCheckState.Error(
+                    message = "Please enable \"Install unknown apps\" for Narayani PDF Reader in Android Settings.",
+                    fallbackApkUrl = (_state.value as? UpdateCheckState.ReadyToInstall)?.release?.apkUrl
+                )
+                _dialogVisible.value = true
             }
+        }
+    }
+
+    fun openPlayStoreForUpdate(context: Context): Boolean {
+        val launchTarget = resolveActivity(context) ?: context.applicationContext
+        val needsNewTask = launchTarget !is Activity
+        val packageName = context.packageName
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("market://details?id=$packageName")
+        ).apply {
+            if (needsNewTask) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            launchTarget.startActivity(marketIntent)
+            return true
+        } catch (_: Exception) {
+            // Fall back to HTTPS Play Store link in browser
+        }
+
+        val webIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse(buildPlayStoreWebUrl(packageName))
+        ).apply {
+            if (needsNewTask) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return try {
+            launchTarget.startActivity(webIntent)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open Play Store: ${e.message}", e)
+            false
         }
     }
 
     fun openDownloadInBrowser(context: Context, rawUrl: String) {
         if (!isValidHttpsApkUrl(rawUrl)) return
+        val launchTarget = resolveActivity(context) ?: context.applicationContext
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl.trim())).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (launchTarget !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(intent)
+            launchTarget.startActivity(intent)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to open browser URL: ${e.message}", e)
         }
@@ -405,6 +654,11 @@ object AppUpdateManager {
     }
 
     fun resetForTesting() {
+        checkJob?.cancel()
+        downloadJob?.cancel()
+        checkJob = null
+        downloadJob = null
+        activityRef = null
         hasRunLaunchCheck = false
         _state.value = UpdateCheckState.Idle
         _dialogVisible.value = false

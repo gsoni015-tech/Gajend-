@@ -90,7 +90,6 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -98,11 +97,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
-import com.example.ads.AdManager
-import com.example.ads.AdMobManager
-import com.example.ads.AdaptiveBannerAdView
+import com.example.ads.StartIoAdManager
+import com.example.ads.StartIoBannerAdView
 import com.example.data.local.PdfEntity
 import com.example.reader.ExcelDocument
 import com.example.reader.OfficeDocumentHelper
@@ -116,8 +112,6 @@ import com.example.ui.theme.WhiteMixBorder
 import com.example.ui.theme.WhiteMixCard
 import com.example.ui.theme.WhiteMixSurface
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.abs
@@ -132,10 +126,9 @@ fun ExcelViewerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
-    val lifecycleOwner = LocalLifecycleOwner.current
     val handleBack: () -> Unit = {
         if (activity != null) {
-            AdMobManager.showBackPressInterstitial(activity) { onBack() }
+            StartIoAdManager.showBackPressInterstitial(activity) { onBack() }
         } else {
             onBack()
         }
@@ -143,23 +136,9 @@ fun ExcelViewerScreen(
 
     BackHandler { handleBack() }
 
-    // Preload interstitial & schedule Impression #2 mid-reading inside Excel Viewer
-    var hasAttemptedInDocAd by remember(entity.path) { mutableStateOf(false) }
-    LaunchedEffect(entity.path, lifecycleOwner) {
-        AdManager.loadInterstitial(context.applicationContext)
-        if (!hasAttemptedInDocAd) {
-            val cooldownRemaining = AdManager.remainingInterstitialCooldownMs()
-            val waitMs = maxOf(AdManager.DOCUMENT_READING_AD_DELAY_MS, cooldownRemaining + 500L)
-            delay(waitMs)
-            AdManager.loadInterstitial(context.applicationContext)
-            AdManager.isInterstitialReadyFlow.first { it }
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                if (!hasAttemptedInDocAd) {
-                    hasAttemptedInDocAd = true
-                    AdManager.showDelayedDocumentInterstitial(activity)
-                }
-            }
-        }
+    // Preload interstitial so it is ready when closing the spreadsheet
+    LaunchedEffect(entity.path) {
+        StartIoAdManager.loadInterstitial(context.applicationContext)
     }
 
     var excelDoc by remember { mutableStateOf<ExcelDocument?>(null) }
@@ -688,7 +667,7 @@ fun ExcelViewerScreen(
                         .navigationBarsPadding(),
                     contentAlignment = Alignment.Center
                 ) {
-                    AdaptiveBannerAdView(
+                    StartIoBannerAdView(
                         modifier = Modifier
                             .fillMaxWidth()
                             .widthIn(max = 728.dp)

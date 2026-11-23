@@ -1,13 +1,13 @@
 package com.example
 
-import com.example.ads.AdManager
+import com.example.ads.StartIoAdManager
 import com.example.ui.theme.AppFonts
 import com.example.util.KrutiDevConverter
 import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Local unit tests for document font resolution, Kruti Dev detection, and AdManager safeguards.
+ * Local unit tests for document font resolution, Kruti Dev detection, and StartIoAdManager safeguards.
  */
 class ExampleUnitTest {
   @Test
@@ -16,153 +16,36 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun adManager_usesExactUnitIdsAnd25SecondCooldown() {
-    assertEquals("ca-app-pub-9247143643125748/5366325906", AdManager.BANNER_AD_UNIT_ID)
-    assertEquals("ca-app-pub-9247143643125748/3927267520", AdManager.INTERSTITIAL_AD_UNIT_ID)
-    assertEquals("ca-app-pub-9247143643125748/5688861742", AdManager.REWARDED_AD_UNIT_ID)
-    assertFalse(AdManager.USE_PRODUCTION_ADS_ALWAYS)
-    assertEquals(25_000L, AdManager.INTERSTITIAL_COOLDOWN_MS)
-    assertEquals(15_000L, AdManager.DOCUMENT_READING_AD_DELAY_MS)
+  fun startIoAdManager_usesExactAppIdTestModeAnd60SecondCooldown() {
+    assertEquals("210114038", StartIoAdManager.START_IO_APP_ID)
+    assertEquals(60_000L, StartIoAdManager.INTERSTITIAL_COOLDOWN_MS)
+    assertTrue(StartIoAdManager.shouldEnableTestAds(isDebug = true))
+    assertFalse(StartIoAdManager.shouldEnableTestAds(isDebug = false))
 
-    AdManager.resetForTesting()
-    assertTrue(AdManager.canShowInterstitial(100_000L))
-    assertEquals(0L, AdManager.remainingInterstitialCooldownMs(100_000L))
+    StartIoAdManager.resetForTesting()
+    assertTrue(StartIoAdManager.canShowInterstitial(100_000L))
+    assertEquals(0L, StartIoAdManager.remainingInterstitialCooldownMs(100_000L))
 
-    AdManager.setLastInterstitialShownTimestampForTesting(100_000L)
-    assertFalse(AdManager.canShowInterstitial(110_000L))
-    assertEquals(15_000L, AdManager.remainingInterstitialCooldownMs(110_000L))
-    assertFalse(AdManager.canShowInterstitial(124_999L))
-    assertEquals(1L, AdManager.remainingInterstitialCooldownMs(124_999L))
-    assertTrue(AdManager.canShowInterstitial(125_000L))
-    assertEquals(0L, AdManager.remainingInterstitialCooldownMs(125_000L))
-    AdManager.resetForTesting()
+    StartIoAdManager.setLastInterstitialShownTimestampForTesting(100_000L)
+    assertFalse(StartIoAdManager.canShowInterstitial(110_000L))
+    assertEquals(50_000L, StartIoAdManager.remainingInterstitialCooldownMs(110_000L))
+    assertFalse(StartIoAdManager.canShowInterstitial(159_999L))
+    assertEquals(1L, StartIoAdManager.remainingInterstitialCooldownMs(159_999L))
+    assertTrue(StartIoAdManager.canShowInterstitial(160_000L))
+    assertEquals(0L, StartIoAdManager.remainingInterstitialCooldownMs(160_000L))
+    StartIoAdManager.resetForTesting()
   }
 
   @Test
-  fun adManager_resolvesTestAdsInDebugAndProductionAdsInRelease() {
-    assertEquals(
-      AdManager.TEST_BANNER_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = true,
-        productionId = AdManager.BANNER_AD_UNIT_ID,
-        testId = AdManager.TEST_BANNER_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.BANNER_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = false,
-        productionId = AdManager.BANNER_AD_UNIT_ID,
-        testId = AdManager.TEST_BANNER_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.TEST_INTERSTITIAL_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = true,
-        productionId = AdManager.INTERSTITIAL_AD_UNIT_ID,
-        testId = AdManager.TEST_INTERSTITIAL_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.INTERSTITIAL_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = false,
-        productionId = AdManager.INTERSTITIAL_AD_UNIT_ID,
-        testId = AdManager.TEST_INTERSTITIAL_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.TEST_REWARDED_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = true,
-        productionId = AdManager.REWARDED_AD_UNIT_ID,
-        testId = AdManager.TEST_REWARDED_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.REWARDED_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = false,
-        productionId = AdManager.REWARDED_AD_UNIT_ID,
-        testId = AdManager.TEST_REWARDED_AD_UNIT_ID
-      )
-    )
-    assertEquals(
-      AdManager.BANNER_AD_UNIT_ID,
-      AdManager.resolveAdUnitId(
-        isDebug = true,
-        productionId = AdManager.BANNER_AD_UNIT_ID,
-        testId = AdManager.TEST_BANNER_AD_UNIT_ID,
-        forceProduction = true
-      )
-    )
-  }
-
-  @Test
-  fun adManager_retryBackoffAndLaunchInterstitialGuards() {
-    assertEquals("Internal Error (0)", AdManager.describeAdErrorCode(0))
-    assertEquals("Invalid Request (1)", AdManager.describeAdErrorCode(1))
-    assertEquals("Network Error (2)", AdManager.describeAdErrorCode(2))
-    assertEquals("No Ad Fill (3)", AdManager.describeAdErrorCode(3))
-    assertEquals("Invalid App ID (8)", AdManager.describeAdErrorCode(8))
-    assertEquals("Error 99", AdManager.describeAdErrorCode(99))
-
-    assertEquals(5_000L, AdManager.retryDelayForAttempt(0))
-    assertEquals(15_000L, AdManager.retryDelayForAttempt(1))
-    assertEquals(30_000L, AdManager.retryDelayForAttempt(2))
-    assertEquals(30_000L, AdManager.retryDelayForAttempt(99))
-
-    assertTrue(
-      AdManager.shouldTriggerLaunchInterstitial(
-        isHomeActive = true,
-        hasAttemptedLaunch = false,
-        hasNavigatedFromHome = false,
-        isAdReady = true,
-        isShowingAd = false,
-        canShowByCooldown = true
-      )
-    )
-    assertFalse(
-      AdManager.shouldTriggerLaunchInterstitial(
-        isHomeActive = false,
-        hasAttemptedLaunch = false,
-        hasNavigatedFromHome = false,
-        isAdReady = true,
-        isShowingAd = false,
-        canShowByCooldown = true
-      )
-    )
-    assertFalse(
-      AdManager.shouldTriggerLaunchInterstitial(
-        isHomeActive = true,
-        hasAttemptedLaunch = true,
-        hasNavigatedFromHome = false,
-        isAdReady = true,
-        isShowingAd = false,
-        canShowByCooldown = true
-      )
-    )
-    assertFalse(
-      AdManager.shouldTriggerLaunchInterstitial(
-        isHomeActive = true,
-        hasAttemptedLaunch = false,
-        hasNavigatedFromHome = true,
-        isAdReady = true,
-        isShowingAd = false,
-        canShowByCooldown = true
-      )
-    )
-    assertFalse(
-      AdManager.shouldTriggerLaunchInterstitial(
-        isHomeActive = true,
-        hasAttemptedLaunch = false,
-        hasNavigatedFromHome = false,
-        isAdReady = false,
-        isShowingAd = false,
-        canShowByCooldown = true
-      )
-    )
+  fun startIoAdManager_retryBackoffAndDefaultReadyState() {
+    StartIoAdManager.resetForTesting()
+    assertEquals(3, StartIoAdManager.MAX_LOAD_RETRIES)
+    assertEquals(5_000L, StartIoAdManager.retryDelayForAttempt(0))
+    assertEquals(15_000L, StartIoAdManager.retryDelayForAttempt(1))
+    assertEquals(30_000L, StartIoAdManager.retryDelayForAttempt(2))
+    assertEquals(30_000L, StartIoAdManager.retryDelayForAttempt(99))
+    assertFalse(StartIoAdManager.isRewardedAdReady())
+    assertFalse(StartIoAdManager.isInterstitialReadyFlow.value)
   }
 
   @Test
@@ -478,6 +361,29 @@ class ExampleUnitTest {
           "apkUrl" to "http://insecure.example/app.apk"
         )
       )
+    )
+
+    val snakeCaseParsed = com.example.update.AppUpdateManager.parseReleaseMap(
+      mapOf(
+        "latest_version_code" to "3",
+        "latest_version_name" to "1.2",
+        "apk_url" to "https://example.com/narayani-v1.2.apk",
+        "release_notes" to "Bug fixes",
+        "force_update" to "true"
+      )
+    )
+    assertNotNull(snakeCaseParsed)
+    assertEquals(3L, snakeCaseParsed!!.latestVersionCode)
+    assertEquals("1.2", snakeCaseParsed.latestVersionName)
+    assertEquals(true, snakeCaseParsed.forceUpdate)
+
+    assertEquals(
+      "https://play.google.com/store/apps/details?id=com.narayani.pdfreader",
+      com.example.update.AppUpdateManager.buildPlayStoreWebUrl("com.narayani.pdfreader")
+    )
+    assertTrue(
+      com.example.update.AppUpdateManager.formatUpdateErrorMessage(RuntimeException("offline"))
+        .contains("internet connection", ignoreCase = true)
     )
   }
 }
