@@ -9,7 +9,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.ApiException
@@ -151,9 +150,8 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context) ?: run {
+        Log.w(AUTH_TAG, "Skipping auto sign-in: default_web_client_id string resource not found")
         onUnauthenticated()
         return
     }
@@ -195,9 +193,7 @@ fun onGoogleSignInClicked(
         onAuthError("Activity context unavailable for Google Sign-In")
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context) ?: run {
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
         return
     }
@@ -243,5 +239,23 @@ fun signOutGoogleAccount(
                 onSignOutComplete()
             }
         }
+    }
+}
+
+@Suppress("DiscouragedApi")
+internal fun resolveDefaultWebClientId(context: Context): String? {
+    return try {
+        val resId = context.resources.getIdentifier(
+            "default_web_client_id",
+            "string",
+            context.packageName
+        )
+        if (resId == 0) {
+            null
+        } else {
+            context.getString(resId).trim().takeIf { it.isNotEmpty() }
+        }
+    } catch (_: Exception) {
+        null
     }
 }
