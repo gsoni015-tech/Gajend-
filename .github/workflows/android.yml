@@ -1,53 +1,15 @@
-name: Build Android APK and AAB
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Generate temporary debug keystore if missing
+- name: Generate release keystore if missing
         run: |
-          if [ ! -f debug.keystore ]; then
+          if [ ! -f my-upload-key.jks ]; then
             keytool -genkeypair -v \
-              -keystore debug.keystore \
+              -keystore my-upload-key.jks \
               -storepass android \
-              -alias androiddebugkey \
+              -alias my-key-alias \
               -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+              -dname "CN=Release Test,O=App,C=IN"
           fi
-
-      - name: Build Debug APK
-        run: gradle assembleDebug
+          ls -la my-upload-key.jks
 
       - name: Build Release AAB
-        run: gradle bundleRelease
-
-      - name: Upload Debug APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Upload Release AAB Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-aab
-          path: app/build/outputs/bundle/release/app-release.aab
+        run: gradle bundleRelease --no-configuration-cache
