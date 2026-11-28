@@ -520,4 +520,78 @@ fun MainAppContent(viewModel: PdfViewModel) {
             AppUpdateManager.openPlayStoreForUpdate(activity ?: context)
         },
         onRetryCheck = {
-            AppUpdateManager.startChe
+            AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = true)
+        }
+    )
+}
+
+@Composable
+fun MainBottomNavigationBar(
+    selectedNavTab: MainNavTab,
+    onSelectTab: (MainNavTab) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = WhiteMixSurface,
+        shadowElevation = 4.dp,
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, WhiteMixBorder),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("main_bottom_navigation_bar")
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp)
+                    .defaultMinSize(minHeight = 58.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MainNavTab.entries.forEach { tab ->
+                    val isSelected = tab == selectedNavTab
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onSelectTab(tab) }
+                            .padding(horizontal = 3.dp, vertical = 4.dp)
+                            .testTag("nav_tab_${tab.name.lowercase()}")
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) BrandPrimaryContainer else Color.Transparent)
+                                .padding(horizontal = 14.dp, vertical = 3.dp)
+                        ) {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = tab.title,
+                                tint = if (isSelected) BrandPrimary else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = tab.title,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) BrandPrimary else TextSecondary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
