@@ -4,11 +4,15 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,6 +32,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -38,6 +44,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -91,17 +98,20 @@ import com.example.ui.theme.BrandCrimson
 import com.example.ui.theme.BrandPrimary
 import com.example.ui.theme.BrandPrimaryContainer
 import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WhiteMixBorder
 import com.example.ui.theme.WhiteMixSurface
 import com.example.ui.viewmodel.CloudSyncViewModel
 import com.example.ui.viewmodel.PdfViewModel
 import com.example.update.AppUpdateManager
+import com.example.util.PermissionUtils
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import java.io.File
 
 enum class MainNavTab(val title: String, val icon: ImageVector) {
@@ -510,23 +520,4 @@ fun MainAppContent(viewModel: PdfViewModel) {
             AppUpdateManager.openPlayStoreForUpdate(activity ?: context)
         },
         onRetryCheck = {
-            AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = true)
-        }
-    )
-}
-
-@Composable
-fun MainBottomNavigationBar(
-    selectedNavTab: MainNavTab,
-    onSelectTab: (MainNavTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        color = WhiteMixSurface,
-        shadowElevation = 4.dp,
-        border = androidx.compose.foundation.BorderStroke(0.5.dp, WhiteMixBorder),
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("main_bottom_navigation_bar")
-    ) {
- 
+            AppUpdateManager.startChe
