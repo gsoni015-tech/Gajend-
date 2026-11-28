@@ -4,15 +4,11 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,7 +19,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,7 +27,6 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,7 +38,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -98,17 +91,17 @@ import com.example.ui.theme.BrandCrimson
 import com.example.ui.theme.BrandPrimary
 import com.example.ui.theme.BrandPrimaryContainer
 import com.example.ui.theme.MyApplicationTheme
-import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WhiteMixBorder
 import com.example.ui.theme.WhiteMixSurface
 import com.example.ui.viewmodel.CloudSyncViewModel
 import com.example.ui.viewmodel.PdfViewModel
 import com.example.update.AppUpdateManager
-import com.example.util.PermissionUtils
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.flowOf
 import java.io.File
 
 enum class MainNavTab(val title: String, val icon: ImageVector) {
@@ -130,8 +123,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        StartIoAdManager.initialize(this)
-        AppUpdateManager.bindActivity(this)
+        try {
+            StartIoAdManager.initialize(this)
+        } catch (_: Throwable) {
+        }
+        try {
+            AppUpdateManager.bindActivity(this)
+        } catch (_: Throwable) {
+        }
 
         // Handle external Intent if opened with document
         handleIncomingIntent(intent)
@@ -145,9 +144,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        StartIoAdManager.onAppResumed(this)
-        AppUpdateManager.bindActivity(this)
-        AppUpdateManager.refreshInstallPermissionState(this)
+        try {
+            StartIoAdManager.onAppResumed(this)
+        } catch (_: Throwable) {
+        }
+        try {
+            AppUpdateManager.bindActivity(this)
+            AppUpdateManager.refreshInstallPermissionState(this)
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -173,7 +178,13 @@ fun MainAppContent(viewModel: PdfViewModel) {
     val activity = context as? Activity
     val lifecycleOwner = LocalLifecycleOwner.current
     val appScope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        try {
+            CredentialManager.create(context)
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
     var selectedNavTab by remember { mutableStateOf(MainNavTab.FILES) }
@@ -182,19 +193,60 @@ fun MainAppContent(viewModel: PdfViewModel) {
     val updateState by AppUpdateManager.state.collectAsState()
     val isUpdateDialogVisible by AppUpdateManager.dialogVisible.collectAsState()
 
-    val currentUser by remember { Firebase.auth.authStateFlow() }
-        .collectAsState(initial = Firebase.auth.currentUser)
+    val isFirebaseReady = remember(context) {
+        try {
+            FirebaseApp.initializeApp(context.applicationContext) != null ||
+                FirebaseApp.getApps(context.applicationContext).isNotEmpty()
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    val currentUser: FirebaseUser? by remember(isFirebaseReady) {
+        if (!isFirebaseReady) {
+            flowOf(null)
+        } else {
+            try {
+                Firebase.auth.authStateFlow()
+            } catch (_: Throwable) {
+                flowOf(null)
+            }
+        }
+    }.collectAsState(
+        initial = if (isFirebaseReady) {
+            try {
+                Firebase.auth.currentUser
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+    )
 
     LaunchedEffect(Unit) {
-        PdfFastCacheManager.refreshStats(context.applicationContext)
-        attemptAutoSignIn(
-            context = context,
-            credentialManager = credentialManager,
-            onAuthSuccess = {},
-            onUnauthenticated = {},
-            scope = appScope
-        )
-        AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = false)
+        try {
+            PdfFastCacheManager.refreshStats(context.applicationContext)
+        } catch (_: Throwable) {
+        }
+        if (isFirebaseReady && credentialManager != null) {
+            try {
+                attemptAutoSignIn(
+                    context = context,
+                    credentialManager = credentialManager,
+                    onAuthSuccess = {},
+                    onUnauthenticated = {},
+                    scope = appScope
+                )
+            } catch (_: Throwable) {
+            }
+        }
+        if (isFirebaseReady) {
+            try {
+                AppUpdateManager.startCheckForUpdates(activity ?: context, isManual = false)
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     val cloudViewModel: CloudSyncViewModel? = currentUser?.let { user ->
@@ -477,59 +529,4 @@ fun MainBottomNavigationBar(
             .fillMaxWidth()
             .testTag("main_bottom_navigation_bar")
     ) {
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 560.dp)
-                    .defaultMinSize(minHeight = 58.dp)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MainNavTab.entries.forEach { tab ->
-                    val isSelected = tab == selectedNavTab
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                        modifier = Modifier
-                            .weight(1f)
-                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onSelectTab(tab) }
-                            .padding(horizontal = 3.dp, vertical = 4.dp)
-                            .testTag("nav_tab_${tab.name.lowercase()}")
-                    ) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isSelected) BrandPrimaryContainer else Color.Transparent)
-                                .padding(horizontal = 14.dp, vertical = 3.dp)
-                        ) {
-                            Icon(
-                                imageVector = tab.icon,
-                                contentDescription = tab.title,
-                                tint = if (isSelected) BrandPrimary else TextSecondary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = tab.title,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) BrandPrimary else TextSecondary
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
+ 
